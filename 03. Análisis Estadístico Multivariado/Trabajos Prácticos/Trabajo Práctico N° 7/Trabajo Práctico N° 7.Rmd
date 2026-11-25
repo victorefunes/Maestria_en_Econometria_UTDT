@@ -1,0 +1,372 @@
+---
+title: "Trabajo Práctico N° 7"
+subtitle: "Maestría en Econometría UTDT - Análisis Estadístico Multivariado"
+author: "Juan Menduiña"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: false
+    self_contained: true
+    df_print: paged
+lang: es
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.align = "center", fig.width = 8, fig.height = 5)
+options(digits = 7, OutDec = ".")
+
+if (!requireNamespace("haven", quietly = TRUE)) install.packages("haven")
+library(haven)
+
+# Carpeta con las bases (firmas.dta, muestra_engh.dta).
+# Se asume que este Rmd está en la carpeta "Trabajo Práctico N° 7".
+datos <- "Datos"
+
+# Formato con coma decimal, como en el informe
+fmt <- function(x, d = 4) format(x, digits = d, decimal.mark = ",")
+tabla <- function(x, d = 4, ...) knitr::kable(x, digits = d, format.args = list(decimal.mark = ","), ...)
+
+azul <- "#1A476F"; rojo <- "#8B2635"
+
+#-------------------------------------------------------------------------------
+# Funciones auxiliares
+#-------------------------------------------------------------------------------
+
+# Resumen por columna (summarize)
+resumen <- function(df) {
+  t(sapply(df, function(x) c(Obs = length(x), Media = mean(x), `Desv. est.` = sd(x),
+                             Mín = min(x), Máx = max(x))))
+}
+
+# Test de igualdad de medias multivariado (gmtest.do): aproximación de Bartlett al lambda de Wilks,
+# stat = [(N-1) - (p+G)/2] * ln(|S| / |Sw|), con S la covarianza total y Sw = SCP intra-grupos / (N-1)
+gmtest_r <- function(X, g) {
+  X <- as.matrix(X); N <- nrow(X); p <- ncol(X); g <- as.factor(g); G <- nlevels(g)
+  S <- cov(X)
+  B <- Reduce(`+`, lapply(levels(g), function(k) {
+    Xk <- X[g == k, , drop = FALSE]
+    crossprod(sweep(Xk, 2, colMeans(Xk)))
+  }))
+  Sw <- B / (N - 1)
+  m <- (N - 1) - (p + G) / 2
+  stat <- m * log(det(S) / det(Sw)); gl <- p * (G - 1)
+  list(stat = stat, gl = gl, p = pchisq(stat, gl, lower.tail = FALSE))
+}
+
+# Análisis discriminante lineal (Stata: discrim lda): covarianza intra-grupos conjunta
+# (denominador N - G); funciones de clasificación = W^-1 mu_g y constante = -mu_g' W^-1 mu_g / 2 + ln(prior_g)
+lda_fit <- function(X, g, priors = NULL) {
+  X <- as.matrix(X); g <- as.factor(g); G <- nlevels(g); N <- nrow(X)
+  if (is.null(priors)) priors <- rep(1 / G, G)
+  mu <- sapply(levels(g), function(k) colMeans(X[g == k, , drop = FALSE]))   # p x G
+  W <- Reduce(`+`, lapply(levels(g), function(k) {
+    Xk <- X[g == k, , drop = FALSE]
+    crossprod(sweep(Xk, 2, colMeans(Xk)))
+  })) / (N - G)
+  Wi <- solve(W)
+  coef <- Wi %*% mu
+  cons0 <- -0.5 * colSums(mu * coef)        # constante que informa Stata (sin ln de la prior)
+  cons <- cons0 + log(priors)               # constante usada para clasificar
+  list(mu = mu, W = W, Wi = Wi, coef = coef, cons0 = cons0, cons = cons, priors = priors,
+       niveles = levels(g))
+}
+
+lda_scores <- function(fit, X) sweep(as.matrix(X) %*% fit$coef, 2, fit$cons, "+")
+
+# Análisis discriminante cuadrático (Stata: discrim qda): una covarianza por grupo
+qda_scores <- function(X, g, priors = NULL) {
+  X <- as.matrix(X); g <- as.factor(g); G <- nlevels(g)
+  if (is.null(priors)) priors <- rep(1 / G, G)
+  sapply(seq_len(G), function(j) {
+    k <- levels(g)[j]
+    Xk <- X[g == k, , drop = FALSE]; mu <- colMeans(Xk); Sk <- cov(Xk)
+    d2 <- mahalanobis(X, mu, Sk)
+    -0.5 * log(det(Sk)) - 0.5 * d2 + log(priors[j])
+  })
+}
+
+# Probabilidades a posteriori a partir de los puntajes discriminantes
+posterior <- function(sc) {
+  e <- exp(sc - apply(sc, 1, max))
+  e / rowSums(e)
+}
+
+# Tabla de clasificación (como "discrim ... resubstitution classification summary")
+tabla_clasif <- function(real, pred, niveles) {
+  table(`Grupo verdadero` = factor(real, levels = niveles),
+        `Clasificado` = factor(pred, levels = niveles))
+}
+tabla_clasif_pct <- function(tab) round(100 * prop.table(tab, 1), 2)
+```
+
+# Ejercicio 1
+
+*La base de datos "firmas.dta" contiene información financiera referida a dos tipos de firmas: 12 firmas consideradas de buena performance y 12 firmas no tan buenas en ese sentido. En la base, se podrán observar dos características relevadas en la totalidad de las firmas: EBITASS (ganancias después de impuestos e intereses sobre activos) y ROTC (retorno sobre el capital).*
+
+```{r ej1-datos}
+firmas <- as.data.frame(read_dta(file.path(datos, "firmas.dta")))
+vars1 <- c("ebitass", "rotc")
+X1 <- firmas[vars1]
+g1 <- firmas$group
+table(`Grupo (group)` = g1)
+```
+
+## (a) Realizar un gráfico de las variables relevadas. Interpretar.
+
+```{r ej1-a}
+tabla(resumen(X1), d = 4)
+tabla(resumen(X1[g1 == 0, ]), d = 4)
+tabla(resumen(X1[g1 == 1, ]), d = 4)
+
+plot(X1$rotc, X1$ebitass, pch = 19, col = c(azul, rojo)[g1 + 1],
+     xlim = c(-0.15, 0.3), ylim = c(-0.1, 0.3),
+     main = "Scatterplot", xlab = "ROTC", ylab = "EBITASS")
+legend("bottomright", legend = c("Good performing companies", "Bad performing companies"),
+       pch = 19, col = c(azul, rojo))
+```
+
+> *Nota: el PDF no incluye texto interpretativo para este inciso (solo el gráfico); la interpretación de abajo es una redacción propia.*
+
+**Interpretación.** Las dos variables están fuertemente asociadas de forma positiva (a mayor retorno sobre el capital, mayor ganancia sobre activos), y las firmas de cada grupo ocupan zonas distintas del plano: las firmas del grupo 0 ("Good performing companies") se concentran en valores altos de ambas variables, y las del grupo 1 ("Bad performing companies"), en valores bajos o negativos. Los grupos están bien separados, aunque hay una zona de solapamiento cerca de ROTC = 0,1 y EBITASS = 0,1, donde se encuentran algunas firmas de ambos grupos.
+
+## (b) Realizar un test de medias multivariado.
+
+```{r ej1-b}
+gm1 <- gmtest_r(X1, g1)
+```
+
+Estadístico = `r fmt(gm1$stat, 10)`.
+P-value = `r format(gm1$p, digits = 9, decimal.mark = ",")`.
+
+Por lo tanto, con un nivel de significancia del 1%, estos datos aportan evidencia suficiente para indicar que los grupos no tienen medias iguales.
+
+## (c) Realizar un análisis discriminante.
+
+Análisis discriminante lineal con probabilidades a priori de 0,5 para cada grupo:
+
+```{r ej1-c}
+lda1 <- lda_fit(X1, g1, priors = c(0.5, 0.5))
+sc1 <- lda_scores(lda1, X1)
+pred1 <- lda1$niveles[max.col(sc1)]
+post1 <- posterior(sc1)
+
+tab1 <- tabla_clasif(g1, pred1, lda1$niveles)
+tab1
+tabla_clasif_pct(tab1)
+```
+
+**Funciones de clasificación:**
+
+```{r ej1-c-func}
+func1 <- rbind(lda1$coef, `_cons` = lda1$cons0)
+colnames(func1) <- paste("group", lda1$niveles)
+tabla(rbind(func1, Priors = lda1$priors), d = 5)
+```
+
+(Como en Stata, la constante informada no incluye el logaritmo de la probabilidad a priori; al clasificar se le suma $\ln(\pi_g)$, que con priors iguales no altera la decisión.)
+
+La frontera de decisión (línea donde las dos funciones de clasificación son iguales) es $EBITASS = a_0 + a_1 \cdot ROTC$:
+
+```{r ej1-c-graf}
+dif1 <- lda1$coef[, 1] - lda1$coef[, 2]; dc1 <- lda1$cons[1] - lda1$cons[2]
+a0 <- unname(-dc1 / dif1["ebitass"]); a1 <- unname(-dif1["rotc"] / dif1["ebitass"])
+c(a0 = a0, a1 = a1)
+
+plot(X1$rotc, X1$ebitass, pch = 19, col = c(azul, rojo)[g1 + 1],
+     xlim = c(-0.15, 0.3), ylim = c(-0.1, 0.3),
+     main = "Análisis discriminante", xlab = "ROTC", ylab = "EBITASS")
+curve(a0 + a1 * x, add = TRUE, col = "darkgreen", from = min(X1$rotc), to = max(X1$rotc))
+legend("bottomright", legend = c("Good performing companies", "Bad performing companies", "Line"),
+       pch = c(19, 19, NA), lty = c(NA, NA, 1), col = c(azul, rojo, "darkgreen"))
+```
+
+Por lo tanto, todas las firmas del grupo 0 se clasifican correctamente (`r tab1["0", "0"]` de `r sum(tab1["0", ])`), mientras que una firma del grupo 1 (`r tab1["1", "0"]` de `r sum(tab1["1", ])`) se clasifica incorrectamente como del grupo 0.
+
+> **⚠ Anotación (la redacción del PDF está invertida respecto de la tabla):** el informe dice que "todas las observaciones clasificadas en el grupo 0 están correctamente clasificadas, mientras que una de las observaciones clasificada en el grupo 1 está incorrectamente clasificada". Según la tabla de clasificación, ocurre al revés: de las `r sum(tab1[, "0"])` firmas *clasificadas* en el grupo 0, `r tab1["1", "0"]` en realidad pertenece al grupo 1 (la observación 20), y las `r sum(tab1[, "1"])` firmas *clasificadas* en el grupo 1 son todas del grupo 1. Lo que sí es cierto es que las 12 firmas que *verdaderamente* son del grupo 0 se clasifican bien y que una de las 12 firmas que *verdaderamente* son del grupo 1 se clasifica mal (tasa de error de `r fmt(100 * (1 - sum(diag(tab1)) / sum(tab1)), 3)`%).
+
+## (d) Obtener predicciones para toda la muestra y comparar con la información observada.
+
+```{r ej1-d}
+d2_1 <- sapply(1:2, function(j) mahalanobis(as.matrix(X1), lda1$mu[, j], lda1$W))
+pred_tab1 <- data.frame(Obs = seq_len(nrow(X1)), True = g1, Class. = as.integer(pred1),
+                        `Prob. grupo 0` = post1[, 1], `Prob. grupo 1` = post1[, 2],
+                        `Mahalanobis² al grupo 0` = d2_1[, 1], `Mahalanobis² al grupo 1` = d2_1[, 2],
+                        Error = ifelse(g1 != as.integer(pred1), "*", ""), check.names = FALSE)
+tabla(pred_tab1, d = 4)
+```
+
+(`*` indica las observaciones mal clasificadas.) La única observación mal clasificada es la 20, con probabilidad a posteriori de `r fmt(post1[20, 1], 4)` para el grupo 0 y `r fmt(post1[20, 2], 4)` para el grupo 1, es decir, una clasificación poco concluyente (la observación 9 también tiene una probabilidad cercana al 50%, pero está bien clasificada).
+
+## (e) Considerar una firma con un EBITASS y un ROTC de 0,1. ¿En qué grupo se la clasificaría?
+
+```{r ej1-e}
+nueva <- data.frame(ebitass = 0.1, rotc = 0.1)
+sc_n <- lda_scores(lda1, nueva)
+cbind(`Puntaje grupo 0` = sc_n[1, 1], `Puntaje grupo 1` = sc_n[1, 2], posterior(sc_n))
+
+plot(X1$rotc, X1$ebitass, pch = 19, col = c(azul, rojo)[g1 + 1],
+     xlim = c(-0.15, 0.3), ylim = c(-0.1, 0.3),
+     main = "Análisis discriminante", xlab = "ROTC", ylab = "EBITASS")
+curve(a0 + a1 * x, add = TRUE, col = "darkgreen", from = min(X1$rotc), to = max(X1$rotc))
+abline(h = 0.1, v = 0.1, col = "red")
+legend("bottomright", legend = c("Good performing companies", "Bad performing companies", "Line"),
+       pch = c(19, 19, NA), lty = c(NA, NA, 1), col = c(azul, rojo, "darkgreen"))
+```
+
+Por lo tanto, considerando una firma con un EBITASS y un ROTC de 0,1, se la clasificaría en el grupo `r lda1$niveles[which.max(sc_n)]` ("Good performing companies"). Cabe aclarar que el punto está cerca de la frontera de decisión (probabilidad a posteriori de `r fmt(posterior(sc_n)[1, 1], 3)` para el grupo 0), por lo que la clasificación es poco concluyente.
+
+
+# Ejercicio 2
+
+*La base de datos "muestra_engh.dta" contiene información proveniente de la Encuesta Nacional de Gastos de los Hogares para tres regiones: Metropolitana, Noreste (NEA) y Sur. Considerar responder a las siguientes consignas con las variables desagregadas por capítulo de gasto.*
+
+| Variable | Descripción |
+|---|---|
+| region | 1 = Metropolitana; 4 = NEA; 6 = Sur |
+| cap1 - cap9 | Alimentos y bebidas; Indumentaria y calzado; Vivienda; Equipamiento y funcionamiento del hogar; Atención médica y gastos para la salud; Transporte y comunicaciones; Esparcimiento; Educación; Bienes y servicios varios |
+
+```{r ej2-datos}
+engh <- as.data.frame(read_dta(file.path(datos, "muestra_engh.dta")))
+vars2 <- paste0("cap", 1:9)
+engh <- engh[complete.cases(engh[c("region", vars2)]), ]
+X2 <- engh[vars2]
+g2 <- factor(engh$region)
+id2 <- as.integer(g2)           # 1, 2, 3 = regiones 1, 4, 6
+groups2 <- nlevels(g2)
+table(`Región` = engh$region)
+```
+
+## (a) Realizar un test de igualdad de medias entre regiones.
+
+```{r ej2-a, results='asis'}
+cat("\n**Total:**\n\n"); print(tabla(resumen(X2), d = 3))
+for (r in levels(g2)) {
+  cat("\n\n**Región ", r, ":**\n\n", sep = "")
+  print(tabla(resumen(X2[g2 == r, ]), d = 3))
+}
+gm2 <- gmtest_r(X2, g2)
+```
+
+Estadístico = `r fmt(gm2$stat, 10)`.
+P-value = `r format(gm2$p, digits = 9, decimal.mark = ",")`.
+
+Por lo tanto, con un nivel de significancia del 1%, estos datos aportan evidencia suficiente para indicar que los grupos no tienen medias iguales.
+
+## (b) Realizar un análisis discriminante.
+
+Siguiendo el do-file, se calcula la matriz de varianzas y covarianzas **total** $S$ de las 9 variables y, para cada región $i$, el vector de medias $\mu_i$, los coeficientes $\alpha_i' = \mu_i' S^{-1}$ y la constante $c_i = \alpha_i' \mu_i$:
+
+```{r ej2-b}
+S2 <- cov(X2)
+S2_inv <- solve(S2)
+medias2 <- sapply(1:groups2, function(i) colMeans(X2[id2 == i, ]))     # 9 x 3
+alpha2 <- t(medias2) %*% S2_inv                                          # 3 x 9
+c2 <- rowSums(alpha2 * t(medias2))                                       # c_i = alpha_i' mu_i
+colnames(medias2) <- paste0("región ", levels(g2)); rownames(alpha2) <- paste0("alpha_", 1:groups2)
+tabla(medias2, d = 3)
+tabla(alpha2, d = 6)
+tabla(data.frame(Región = levels(g2), `c_i` = c2), d = 6)
+```
+
+## (c) Obtener las predicciones a partir de la/s estimación/es de la función/es discriminante/s.
+
+La puntuación de cada región es $p_i = \alpha_i' x - c_i/2$, y se clasifica cada hogar en la región con mayor puntuación:
+
+```{r ej2-c}
+P2 <- as.matrix(X2) %*% t(alpha2)
+P2 <- sweep(P2, 2, c2 / 2, "-")
+predict1 <- max.col(P2)
+table(predict1)
+```
+
+## (d) Obtener las predicciones a partir de las distancias de Mahalanobis.
+
+Se clasifica cada hogar en la región cuyo vector de medias esté más cerca en la distancia de Mahalanobis $d_i = (x - \mu_i)' S^{-1} (x - \mu_i)$:
+
+```{r ej2-d}
+D2 <- sapply(1:groups2, function(i) mahalanobis(as.matrix(X2), medias2[, i], S2))
+predict2 <- max.col(-D2)
+table(predict1 = predict1, predict2 = predict2)
+```
+
+Las dos reglas son equivalentes: como $d_i = x'S^{-1}x - 2\alpha_i'x + c_i$, minimizar la distancia de Mahalanobis equivale a maximizar $\alpha_i'x - c_i/2$, por lo que las predicciones coinciden en todos los casos (la tabla es diagonal).
+
+## (e) Completar una tabla de predicción-realización.
+
+```{r ej2-e}
+tab2 <- table(`Región (id)` = factor(id2, labels = paste0("id_", 1:groups2)),
+              Predicción = factor(predict1, levels = 1:groups2, labels = paste0("predict_", 1:groups2)))
+tab2
+ok2 <- sum(diag(tab2))
+wr2 <- nrow(X2) - ok2
+```
+
+Correct = `r ok2`.
+Incorrect = `r wr2`.
+
+Por lo tanto, `r ok2` y `r wr2` observaciones fueron clasificadas correcta e incorrectamente, respectivamente.
+
+Análisis discriminante lineal estándar (`discrim lda`, con covarianza intra-grupos conjunta y probabilidades a priori iguales):
+
+```{r ej2-e-lda}
+lda2 <- lda_fit(X2, id2)
+pred_lda2 <- max.col(lda_scores(lda2, X2))
+tab_lda2 <- table(`Región (id)` = factor(id2), Clasificado = factor(pred_lda2, levels = 1:groups2))
+tab_lda2
+tabla_clasif_pct(tab_lda2)
+```
+
+> **⚠ Anotación (diferencia entre la regla del do-file y el análisis discriminante lineal estándar):** la tabla de predicción-realización del inciso (e) se obtiene con la covarianza **total** $S$ de toda la muestra (como en el do-file), pero el análisis discriminante lineal supone una matriz de covarianzas común **intra-grupos** (la covarianza conjunta de los grupos, con denominador $N - G$). Por eso los resultados difieren levemente: `r ok2` aciertos con la regla del do-file frente a `r sum(diag(tab_lda2))` con `discrim lda`, y la distribución de la clasificación no es idéntica (por ejemplo, la región 3 pasa de `r tab2[3, 1]`, `r tab2[3, 2]`, `r tab2[3, 3]` a `r tab_lda2[3, 1]`, `r tab_lda2[3, 2]`, `r tab_lda2[3, 3]` observaciones clasificadas en cada región). El informe presenta ambas tablas sin comentar la diferencia. Además, estas tasas de acierto son de *resustitución* (se evalúa con los mismos datos con que se estima) y, por lo tanto, son optimistas.
+
+## (f) ¿Cómo se realizaría el análisis en caso de no poder suponer que las matrices de varianzas y covarianzas son iguales entre grupos? ¿Cuántos parámetros se deberían estimar?
+
+Si no se puede suponer que las matrices de varianzas y covarianzas son iguales entre grupos, se estima una matriz de covarianzas $S_g$ para cada grupo y se aplica el análisis discriminante **cuadrático**: cada observación se asigna al grupo que minimiza $\tfrac{1}{2}(x - \mu_g)'S_g^{-1}(x - \mu_g) + \tfrac{1}{2}\ln|S_g|$ (con probabilidades a priori iguales):
+
+```{r ej2-f}
+Sg <- lapply(1:groups2, function(i) cov(X2[id2 == i, ]))
+cg <- sapply(Sg, function(S) log(det(S)) / 2)
+names(cg) <- paste0("c", 1:groups2)
+cg
+
+D_new <- sapply(1:groups2, function(i) mahalanobis(as.matrix(X2), medias2[, i], Sg[[i]]) / 2 + cg[i])
+predict2_new <- max.col(-D_new)
+tab2_new <- table(`Región (id)` = factor(id2, labels = paste0("id_", 1:groups2)),
+                  Predicción = factor(predict2_new, levels = 1:groups2, labels = paste0("predict_", 1:groups2)))
+tab2_new
+ok2_new <- sum(diag(tab2_new))
+```
+
+Correct = `r ok2_new`.
+Incorrect = `r nrow(X2) - ok2_new`.
+
+Por lo tanto, `r ok2_new` y `r nrow(X2) - ok2_new` observaciones fueron clasificadas correcta e incorrectamente, respectivamente.
+
+Análisis discriminante cuadrático estándar (`discrim qda`):
+
+```{r ej2-f-qda}
+pred_qda2 <- max.col(qda_scores(X2, id2))
+tab_qda2 <- table(`Región (id)` = factor(id2), Clasificado = factor(pred_qda2, levels = 1:groups2))
+tab_qda2
+tabla_clasif_pct(tab_qda2)
+```
+
+La regla del do-file coincide con `discrim qda` (las predicciones son idénticas): `r all(predict2_new == pred_qda2)`.
+
+**Cantidad de parámetros.** Con $p = 9$ variables y $G = 3$ grupos:
+
+```{r ej2-f-params}
+p <- 9; G <- 3
+tabla(data.frame(
+  Modelo = c("Lineal (covarianza común)", "Cuadrático (una covarianza por grupo)"),
+  `Medias` = G * p,
+  `Covarianzas` = c(p * (p + 1) / 2, G * p * (p + 1) / 2),
+  `Probabilidades a priori` = G - 1,
+  `Total` = c(G * p + p * (p + 1) / 2 + (G - 1), G * p + G * p * (p + 1) / 2 + (G - 1)),
+  check.names = FALSE), d = 0)
+```
+
+En el caso lineal se estiman 3 vectores de medias (27 parámetros) y una matriz de covarianzas común (45 parámetros); en el cuadrático, 3 vectores de medias (27) y 3 matrices de covarianzas (135 parámetros), es decir, 162 parámetros (más 2 si se estiman las probabilidades a priori). El costo es una mayor varianza de estimación, sobre todo con grupos pequeños.
+
+> *Nota: el PDF no responde la pregunta sobre cuántos parámetros se deben estimar (solo muestra la tabla de clasificación del análisis cuadrático); el recuento de arriba es una redacción propia. Por otro lado, en esta muestra el análisis cuadrático no mejora la clasificación (`r ok2_new` aciertos frente a `r sum(diag(tab_lda2))` del lineal), lo que sugiere que la mayor flexibilidad no compensa el aumento de parámetros a estimar.*

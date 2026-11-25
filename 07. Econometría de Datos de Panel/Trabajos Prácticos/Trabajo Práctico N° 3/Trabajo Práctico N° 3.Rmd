@@ -1,0 +1,597 @@
+---
+title: "Trabajo Práctico N° 3: Modelos de Panel Dinámicos"
+subtitle: "Econometría de Datos de Panel — Maestría en Economía y Econometría, UTDT"
+author: "Victor Funes"
+date: "2022"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = TRUE, message = FALSE, warning = FALSE)
+library(haven)     # lectura de .dta
+library(plm)       # FE (within)
+library(sandwich)  # errores estándar clusterizados
+library(lmtest)    # coeftest
+library(MASS)      # ginv
+library(knitr)
+
+# Diferencia máxima absoluta entre lo estimado en R y lo reportado en el PDF
+dif <- function(est, pdf) signif(max(abs(unname(est) - pdf)), 3)
+```
+
+> **Cómo leer este documento.** Cada inciso reúne (i) el enunciado de *Trabajo Práctico N° 3 (P).pdf*, (ii) la respuesta del PDF de resolución *Trabajo Práctico N° 3 (R).pdf*, (iii) cuando existe, la respuesta del solucionario *Trabajo Práctico N° 3 (S).pdf* (que sólo resuelve los Ejercicios 1 y 2), y (iv) una **replicación en R** (todo el documento usa **sólo R**; el `.do` de Stata sirvió de guía).
+> Los bloques `{r}` se ejecutan al tejer y leen `Datos/mod_abdata.dta`. Como R no tiene `xtabond2`, se programó un **motor GMM propio** (sección siguiente) que reproduce, al decimal, los coeficientes, errores estándar, tests de Sargan/Hansen y tests de Arellano-Bond de las salidas de `xtabond2` del PDF R. En cada replicación se reporta la **diferencia máxima** contra el PDF (`dif`).
+> Las inconsistencias entre enunciado, código, resolución y solucionario están marcadas con **⚠️ DISCREPANCIA**. Al final hay una tabla resumen.
+
+---
+
+# Herramientas: motor GMM tipo `xtabond2`
+
+El motor construye, para cada firma, las ecuaciones en primeras diferencias (y en niveles si es sistema), las matrices de instrumentos estilo GMM / estándar (con *missing = 0*, opción `collapse` y límites de rezagos), y estima GMM en uno o dos pasos con errores estándar clásicos, robustos o corregidos por Windmeijer. Se validó contra las salidas del PDF R (ver las comparaciones `dif` en cada inciso).
+
+```{r datos}
+d <- as.data.frame(read_dta("Datos/mod_abdata.dta"))
+d <- d[order(d$id, d$year), ]                              # equivale a xtset id year
+N  <- length(unique(d$id)); Tt <- length(unique(d$year))
+c(firmas = N, anios = Tt, obs = nrow(d))
+
+ser  <- function(v) matrix(d[[v]], N, Tt, byrow = TRUE)    # matriz N x T de una variable
+lagm <- function(M, j = 1) if (j == 0) M else cbind(matrix(NA, nrow(M), j), M[, seq_len(ncol(M) - j), drop = FALSE])
+dm   <- function(M) M - lagm(M, 1)                         # primera diferencia (operador D.)
+n_ <- ser("n"); w_ <- ser("w"); k_ <- ser("k"); ys_ <- ser("ys")
+yrs <- setNames(lapply(1977:1982, function(a) ser(paste0("yr", a))), paste0("yr", 1977:1982))
+```
+
+```{r motor}
+# regs:  lista nombrada de matrices N x T (niveles) con los regresores (Stata-lags ya aplicados)
+# gmm:   lista de series para instrumentos tipo GMM (p. ej. L.n); lags = limites de rezagos de esa serie
+# ivfd:  instrumentos "standard" de la ecuacion en diferencias (se diferencian)
+# ivlev: instrumentos "standard" de la ecuacion en niveles (sistema)
+gmm_est <- function(y, regs, gmm = list(), lags = c(1, 99), collapse = FALSE, ivfd = list(), ivlev = list(),
+                    system = FALSE, step = 1, robust = FALSE) {
+  K <- length(regs); rows <- vector("list", N)
+  for (i in 1:N) {
+    # ---- ecuaciones en diferencias: t = 2..T
+    Xd <- matrix(sapply(regs, function(M) dm(M)[i, 2:Tt]), ncol = K)
+    yd <- dm(y)[i, 2:Tt]
+    ok <- !is.na(yd) & rowSums(is.na(Xd)) == 0
+    zc <- list()
+    for (m in seq_along(gmm)) {
+      M <- gmm[[m]]
+      if (!collapse) {                                        # una columna por (periodo, rezago)
+        for (t in 2:Tt) for (j in lags[1]:min(lags[2], t - 1)) {
+          col <- rep(0, Tt - 1); v <- M[i, t - j]; col[t - 1] <- ifelse(is.na(v), 0, v)
+          zc[[length(zc) + 1]] <- col }
+      } else {                                                # collapse: una columna por rezago
+        for (j in lags[1]:min(lags[2], Tt - 1)) {
+          col <- rep(0, Tt - 1)
+          for (t in 2:Tt) if (t - j >= 1) { v <- M[i, t - j]; col[t - 1] <- ifelse(is.na(v), 0, v) }
+          zc[[length(zc) + 1]] <- col }
+      }
+    }
+    for (m in seq_along(ivfd)) { col <- dm(ivfd[[m]])[i, 2:Tt]; col[is.na(col)] <- 0; zc[[length(zc) + 1]] <- col }
+    Zd <- matrix(unlist(zc), nrow = Tt - 1)
+    eq <- list(X = Xd[ok, , drop = FALSE], y = yd[ok], Z = Zd[ok, , drop = FALSE], t = (2:Tt)[ok], type = rep("d", sum(ok)))
+    if (system) {                                             # ---- ecuaciones en niveles
+      Xl_ <- cbind(matrix(sapply(regs, function(M) M[i, ]), ncol = K), 1)
+      yl_ <- y[i, ]; okl <- !is.na(yl_) & rowSums(is.na(Xl_)) == 0
+      cols <- list()
+      for (m in seq_along(gmm)) {                             # instrumentos GMM para niveles: D.(serie), rezago 0
+        M <- gmm[[m]]
+        if (!collapse) for (t in 1:Tt) { col <- rep(0, Tt); v <- if (t >= 2) M[i, t] - M[i, t - 1] else NA
+          col[t] <- ifelse(is.na(v), 0, v); cols[[length(cols) + 1]] <- col }
+        else { col <- rep(0, Tt); for (t in 2:Tt) { v <- M[i, t] - M[i, t - 1]; col[t] <- ifelse(is.na(v), 0, v) }
+          cols[[length(cols) + 1]] <- col }
+      }
+      for (m in seq_along(ivlev)) { col <- ivlev[[m]][i, ]; col[is.na(col)] <- 0; cols[[length(cols) + 1]] <- col }
+      cols[[length(cols) + 1]] <- rep(1, Tt)                  # constante
+      Zlv <- matrix(unlist(cols), nrow = Tt)
+      nd <- ncol(eq$Z); nl <- ncol(Zlv)                       # bloques de instrumentos disjuntos
+      Zdd <- cbind(eq$Z, matrix(0, sum(ok), nl)); Zll <- cbind(matrix(0, sum(okl), nd), Zlv[okl, , drop = FALSE])
+      eq$X <- rbind(cbind(eq$X, 0), Xl_[okl, , drop = FALSE]); eq$y <- c(eq$y, yl_[okl]); eq$Z <- rbind(Zdd, Zll)
+      eq$t <- c(eq$t, (1:Tt)[okl]); eq$type <- c(eq$type, rep("l", sum(okl)))
+    }
+    rows[[i]] <- eq
+  }
+  nm <- names(regs); if (system) nm <- c(nm, "_cons")
+  Xall <- do.call(rbind, lapply(rows, `[[`, "X")); Zall <- do.call(rbind, lapply(rows, `[[`, "Z"))
+  # se descartan columnas nulas y colineales (conservando el orden de aparicion)
+  keepX <- which(colSums(abs(Xall)) > 0); qx <- qr(Xall[, keepX, drop = FALSE]); keepX <- keepX[sort(qx$pivot[seq_len(qx$rank)])]
+  keepZ <- which(colSums(abs(Zall)) > 0); qz <- qr(Zall[, keepZ, drop = FALSE]); keepZ <- keepZ[sort(qz$pivot[seq_len(qz$rank)])]
+  for (i in 1:N) { rows[[i]]$X <- rows[[i]]$X[, keepX, drop = FALSE]; rows[[i]]$Z <- rows[[i]]$Z[, keepZ, drop = FALSE] }
+  nmk <- nm[keepX]; L <- length(keepZ); Kx <- length(keepX)
+
+  # Matriz H del paso 1: diferencias (2 en diagonal, -1 adyacentes); niveles = I; en sistema, covarianza cruzada
+  # Cov(D.e_t, e_t) = 1 y Cov(D.e_t, e_{t-1}) = -1 (Blundell y Bond, 1998)
+  Hm <- function(eq) {
+    r <- length(eq$y); H <- diag(r)
+    for (a in seq_len(r)) { if (eq$type[a] == "d") H[a, a] <- 2
+      if (a < r && eq$type[a] == "d" && eq$type[a + 1] == "d" && eq$t[a + 1] == eq$t[a] + 1) H[a, a + 1] <- H[a + 1, a] <- -1 }
+    if (system) for (a in seq_len(r)) for (b in seq_len(r)) if (eq$type[a] == "d" && eq$type[b] == "l") {
+      cc <- if (eq$t[b] == eq$t[a]) 1 else if (eq$t[b] == eq$t[a] - 1) -1 else 0; H[a, b] <- H[b, a] <- cc }
+    H }
+  Hl  <- lapply(rows, Hm)
+  ZHZ <- Reduce(`+`, lapply(seq_len(N), function(i) t(rows[[i]]$Z) %*% Hl[[i]] %*% rows[[i]]$Z))
+  XZ  <- Reduce(`+`, lapply(rows, function(e) t(e$X) %*% e$Z)); Zy <- Reduce(`+`, lapply(rows, function(e) t(e$Z) %*% e$y))
+  # sigma^2 (xtabond2): suma de e^2 de las filas en diferencias / (2 * n_dif)
+  s2fun <- function(rs) { s <- 0; nd <- 0; for (i in 1:N) { isd <- rows[[i]]$type == "d"; s <- s + sum(rs[[i]][isd]^2); nd <- nd + sum(isd) }; s / (2 * nd) }
+  W1 <- ginv(ZHZ); b1 <- solve(XZ %*% W1 %*% t(XZ), XZ %*% W1 %*% Zy)
+  res <- lapply(rows, function(e) as.numeric(e$y - e$X %*% b1)); nobs <- sum(sapply(rows, function(e) length(e$y)))
+  S  <- Reduce(`+`, lapply(1:N, function(i) { g <- t(rows[[i]]$Z) %*% res[[i]]; g %*% t(g) }))
+  A1 <- solve(XZ %*% W1 %*% t(XZ)); V1r <- A1 %*% (XZ %*% W1 %*% S %*% W1 %*% t(XZ)) %*% A1
+  W2 <- ginv(S); b2 <- solve(XZ %*% W2 %*% t(XZ), XZ %*% W2 %*% Zy)
+  e2 <- lapply(rows, function(r) as.numeric(r$y - r$X %*% b2)); A2 <- solve(XZ %*% W2 %*% t(XZ))
+  g2 <- Reduce(`+`, lapply(1:N, function(i) t(rows[[i]]$Z) %*% e2[[i]]))
+  if (step == 1) { b <- b1; e <- res; Wt <- W1; V <- if (robust) V1r else s2fun(res) * A1
+  } else { b <- b2; e <- e2; Wt <- W2; V <- A2
+    if (robust) {                                             # correccion de Windmeijer (2005)
+      D <- matrix(0, Kx, Kx)
+      for (p in 1:Kx) {
+        dS <- Reduce(`+`, lapply(1:N, function(i) { zi <- t(rows[[i]]$Z); gi <- zi %*% res[[i]]; dgi <- -zi %*% rows[[i]]$X[, p]
+          dgi %*% t(gi) + gi %*% t(dgi) }))
+        D[, p] <- as.numeric(-A2 %*% XZ %*% W2 %*% dS %*% W2 %*% g2)
+      }
+      V <- A2 + D %*% A2 + A2 %*% t(D) + D %*% V1r %*% t(D) } }
+  gS <- Reduce(`+`, lapply(1:N, function(i) t(rows[[i]]$Z) %*% res[[i]]))
+  list(coef = setNames(as.numeric(b), nmk), se = setNames(sqrt(diag(V)), nmk), n = nobs, ninst = L, df = L - Kx,
+       sargan = as.numeric(t(gS) %*% W1 %*% gS) / s2fun(res),   # Sargan (paso 1, clasico)
+       hansen = as.numeric(t(g2) %*% W2 %*% g2),                 # Hansen (S del paso 1, residuos del paso 2)
+       rows = rows, e = e, XZ = XZ, Wt = Wt, Vb = V, Hl = Hl, s2 = s2fun(res), classic = (step == 1 && !robust))
+}
+
+# Test de autocorrelacion de Arellano-Bond de orden j sobre los residuos en diferencias
+ar_test <- function(r, j) {
+  rows <- r$rows; e <- r$e
+  el <- lapply(seq_along(rows), function(i) { ri <- rows[[i]]; v <- numeric(length(e[[i]]))
+    for (a in seq_along(v)) if (ri$type[a] == "d") { b <- which(ri$type == "d" & ri$t == ri$t[a] - j); if (length(b)) v[a] <- e[[i]][b] }
+    v })
+  d0 <- sum(mapply(function(a, b) sum(a * b), el, e))
+  Xl <- Reduce(`+`, lapply(seq_along(rows), function(i) t(el[[i]]) %*% rows[[i]]$X))
+  if (r$classic) {
+    c1 <- r$s2 * sum(mapply(function(a, H) as.numeric(t(a) %*% H %*% a), el, r$Hl))
+    zs <- r$s2 * Reduce(`+`, lapply(seq_along(rows), function(i) t(rows[[i]]$Z) %*% r$Hl[[i]] %*% el[[i]]))
+  } else {
+    c1 <- sum(mapply(function(a, b) sum(a * b)^2, el, e))
+    zs <- Reduce(`+`, lapply(seq_along(rows), function(i) t(rows[[i]]$Z) %*% e[[i]] * sum(e[[i]] * el[[i]])))
+  }
+  A  <- solve(r$XZ %*% r$Wt %*% t(r$XZ))
+  c2 <- -2 * as.numeric(Xl %*% A %*% r$XZ %*% r$Wt %*% zs); c3 <- as.numeric(Xl %*% r$Vb %*% t(Xl))
+  d0 / sqrt(c1 + c2 + c3)
+}
+
+# Resumen: diagnosticos
+diag_gmm <- function(r, ar = TRUE) c(N = r$n, instr = r$ninst, Sargan = r$sargan, `p(Sargan)` = pchisq(r$sargan, r$df, lower.tail = FALSE),
+  Hansen = r$hansen, `p(Hansen)` = pchisq(r$hansen, r$df, lower.tail = FALSE),
+  AR1 = if (ar) ar_test(r, 1) else NA, AR2 = if (ar) ar_test(r, 2) else NA)
+```
+
+> **Nota sobre `xtabond2`.** Ver *Roodman (2009)*. Varios detalles son necesarios para reproducir al decimal las salidas del PDF: (i) los instrumentos GMM se arman con *missing = 0*; (ii) en sistema, el paso 1 usa una $H$ con covarianza cruzada entre diferencias y niveles ($\text{Cov}(\Delta e_t,e_t)=1$, $\text{Cov}(\Delta e_t,e_{t-1})=-1$); (iii) $\hat\sigma^2$ se calcula sólo con las filas en diferencias; (iv) el estadístico de Hansen usa la matriz $S$ del primer paso y los residuos del segundo.
+
+---
+
+# Ejercicio 1
+
+**Enunciado.** Considere la base de datos *mod_abdata.dta* que fue utilizada por Arellano y Bond en su famoso paper de 1991. Se trata de un panel de **140** empresas británicas encuestadas anualmente entre 1976 y 1984. El panel original no es balanceado, pero la versión para este ejercicio se trata de un panel balanceado de empresas con observaciones para exactamente 6 años entre 1977 y 1982. La variable que identifica la empresa es *id* y la variable que identifica el tiempo es *year*. La variable *n* es el empleo de la empresa. Luego, considere un modelo muy simplificado del siguiente tipo:
+
+$$\ln n_{it}=\rho\ln n_{it-1}+\varepsilon_{it},\qquad \varepsilon_{it}=c_i+\nu_{it},\qquad E[c_i]=E[\nu_{it}]=E[c_i\nu_{it}]=0$$
+
+donde $n_{it}$ es el empleo de la empresa $i$ en el año $t$.
+
+> **⚠️ DISCREPANCIA 1 (enunciado vs. datos).** El enunciado dice **140** empresas; la base tiene **138** (también lo muestran todas las salidas del PDF R: "Number of groups = 138"). Además, el enunciado dice que el panel está balanceado con 6 años exactos: eso es cierto para $n$ (138 × 6 = 828 filas), pero la variable de rezago *nL1* **viene precalculada** de la base original, que incluye 1976 para algunas firmas; por eso la POLS usa 770 observaciones (y no 690 ni 828) y FE queda con 5–6 obs. por grupo. Con los rezagos que calcula Stata (`L.n`) se pierde 1977 para todas las firmas, de allí las 632 obs. de los GMM. Menor: el encabezado de (P) dice 2021 y el de (S) 2022.
+
+```{r ej1-datos}
+nL1 <- ser("nL1"); nL2 <- ser("nL2")
+c(nL1_faltantes = sum(is.na(nL1)), nL2_faltantes = sum(is.na(nL2)))     # 58 y 196
+```
+
+## (a) OLS
+
+**Enunciado.** Estime el modelo por OLS. ¿Qué sesgo esperaría encontrar y por qué?
+
+**Resultado (PDF R):** `nL1` 0,9967362 (0,0036027); constante −0,0379493 (0,0063799); N = 770; $R^2$ = 0,9901.
+
+**Resolución (PDF R) y Solucionario (S):** "El sesgo que se esperaría encontrar es el sesgo de paneles dinámicos, el cual se desprende que $\ln n_{it-1}$ está correlacionado con los efectos fijos, $c_i$, que se encuentran en el término de error. En general, bajo muchos supuestos, OLS sobrestima el valor real del parámetro $\rho$ (ver Hsiao, p. 85)."
+
+**Replicación en R:**
+
+```{r ej1-a}
+ols1 <- lm(n ~ nL1, d)
+round(coef(summary(ols1)), 7)
+c(N = nobs(ols1), R2 = round(summary(ols1)$r.squared, 4),
+  dif_coef = dif(coef(ols1), c(-.0379493, .9967362)), dif_ee = dif(coef(summary(ols1))[, 2], c(.0063799, .0036027)))
+```
+
+## (b) Efectos fijos
+
+**Enunciado.** Estime el modelo usando efectos fijos (FE). ¿Permite la transformación *within* eliminar el sesgo de paneles dinámicos?
+
+**Resultado (PDF R):** `nL1` 0,869605 (0,0351375); constante 0,1076112; N = 770, 138 grupos (5–6 obs. por grupo); $R^2$ within = 0,4926; sigma_u = 0,18358137; sigma_e = 0,1315487; rho = 0,66073284.
+
+**Resolución (PDF R y S):** "La transformación *within* no permite eliminar el sesgo de paneles dinámicos, ya que, ahora, el problema se encuentra en que $\widetilde{\ln n_{it-1}}=\ln n_{it-1}-\overline{\ln n_{i-1}}$ está correlacionado con $\tilde\nu_{it}=\nu_{it}-\bar\nu_{i}$, aun cuando $\nu_{it}$ no tiene correlación serial. En particular, el término $\ln n_{it-1}$ correlaciona negativamente con $\frac{-1}{T-1}\nu_{it-1}$ que se encuentra dentro de $\bar\nu_i$ ... Nickell mostró que, si $\rho>0$, este sesgo es siempre negativo." (S agrega: el sesgo "no surge por los $c_i$ sino por el hecho de que, al ser dinámico el panel, estamos poniendo los $\nu_{it}$ en varios lados distintos".)
+
+**Replicación en R:**
+
+```{r ej1-b}
+fe1 <- plm(n ~ nL1, d, index = c("id", "year"), model = "within")
+round(rbind(coef = coef(fe1), se = coef(summary(fe1))[, 2]), 7)
+c(N = nobs(fe1), R2_within = round(summary(fe1)$r.squared[1], 4), constante = round(unname(within_intercept(fe1)), 7),
+  dif_coef = dif(coef(fe1), .869605), dif_ee = dif(coef(summary(fe1))[, 2], .0351375))
+```
+
+## (c) Primeras diferencias: ¿sigue siendo endógena la dependiente rezagada?
+
+**Enunciado.** Considere una transformación de diferencias finitas de primer orden del modelo. ¿Continúa siendo la variable dependiente rezagada potencialmente endógena?
+
+**Resolución (PDF R y S):** "... la variable dependiente rezagada continúa siendo potencialmente endógena, ya que el término $\Delta\ln n_{it-1}=\ln n_{it-1}-\ln n_{it-2}$ está correlacionado con $\nu_{it-1}$ en $\Delta\nu_{it}=\nu_{it}-\nu_{it-1}$." (S: "a pesar de que los efectos fijos se van ...").
+
+## (d) Anderson-Hsiao
+
+**Enunciado.** Implemente el estimador de Anderson-Hsiao a partir del comando *ivregress* en Stata.
+
+**Resultado (PDF R):** `ivregress 2sls D.n (D.nL1 = nL2), noconstant`: N = 632; `D.nL1` **2,015601** (0,4911953); Root MSE 0,25024.
+
+**Solucionario (S):** "$\ln n_{it-2}$ surge como un instrumento candidato natural para $\Delta\ln n_{it-1}$ ... pero $\ln n_{it-2}$ no está relacionado con $\Delta\nu_{it}$ siempre y cuando los $\nu_{it}$ no presenten correlación serial. ... Ahora bien, 2SLS es eficiente bajo errores i.i.d. esféricos. Sin embargo, luego de tomar diferencias, ... $\Delta\nu_{it}$ puede estar correlacionado con $\Delta\nu_{it-1}$."
+
+> **⚠️ DISCREPANCIA 2.** El PDF R **no comenta** que el estimador de Anderson-Hsiao da $\hat\rho=2{,}016$, es decir, **mayor que 1** (raíz explosiva) y **fuera del intervalo [FE, OLS] = [0,870; 0,997]** dentro del cual debería caer un estimador consistente (argumento que sí usa (S) en 2(b) para el ejercicio siguiente). En el Ejercicio 2(c) (S) sí comenta este problema (coeficiente muy mayor que 1 y no significativo), pero no aquí.
+
+**Replicación en R** (2SLS programado a mano; `ivregress` sin `small` usa $\hat\sigma^2=e'e/N$):
+
+```{r iv2sls}
+iv2sls <- function(y, X, Z) {                       # X: regresores; Z: instrumentos (incluye los exogenos)
+  PZX <- Z %*% solve(crossprod(Z), crossprod(Z, X))
+  b <- solve(crossprod(PZX, X), crossprod(PZX, y)); e <- y - X %*% b
+  V <- (sum(e^2) / nrow(X)) * solve(crossprod(PZX, X))
+  list(coef = drop(b), se = sqrt(diag(V)), n = nrow(X))
+}
+```
+
+```{r ej1-d}
+dn <- dm(n_); dnL1 <- dm(nL1)
+ok <- !is.na(dn) & !is.na(dnL1) & !is.na(nL2)
+ah1 <- iv2sls(dn[ok], matrix(dnL1[ok]), matrix(nL2[ok]))
+c(N = ah1$n, coef = ah1$coef, se = ah1$se, dif_coef = dif(ah1$coef, 2.015601), dif_ee = dif(ah1$se, .4911953))
+```
+
+## (e) GMM en diferencias (Arellano-Bond), todos los instrumentos
+
+**Enunciado.** Ahora, obtenga la estimación GMM de $\rho$ utilizando todos los instrumentos posibles en niveles para el modelo en primeras diferencias. Para ello utilice el comando *xtabond2*.
+
+**Resultado (PDF R):**
+
+| | $\hat\rho$ (EE) | N | Instr. | AR(1) | AR(2) | Sargan / Hansen |
+|---|---|---|---|---|---|---|
+| Un paso | 1,146045 (0,0865907) | 632 | 10 | −4,21 (p = 0,000) | −2,35 (p = 0,019) | Sargan $\chi^2(9)$ = 122,88 (p = 0,000) |
+| Dos pasos | 1,176208 (0,0771686) | 632 | 10 | −2,97 (p = 0,003) | −1,71 (p = 0,087) | Sargan 122,88; Hansen $\chi^2(9)$ = 48,86 (p = 0,000) |
+
+**Solucionario (S):** "El estimador GMM de Arellano-Bond (1991) aborda directamente el problema del inciso previo, modelando la estructura del error de forma más realista, lo que hace que sea asintóticamente más preciso ... Adicionalmente, al estar utilizando más condiciones de momentos, ... un estimador más eficiente que el del inciso previo." (El PDF R no incluye comentario.)
+
+> **⚠️ DISCREPANCIA 3.** Ni (R) ni (S) mencionan que, en este modelo simplificado, los estimadores GMM en diferencias dan $\hat\rho=1{,}146$ y $1{,}176$: **mayores que 1 y mayores que OLS (0,997)**, es decir, **fuera del intervalo [FE, OLS]**; que el test de Sargan/Hansen **rechaza** la validez de los instrumentos (p = 0,000) y que el test de AR(2) **rechaza** (p = 0,019 en un paso) la ausencia de correlación serial de segundo orden en diferencias. Es decir, la especificación del Ejercicio 1(e) está mal especificada, y la afirmación de (S) sobre eficiencia no es aplicable sin esas salvedades (el propio (S) lo reconoce recién en 1(g): "se rechaza la hipótesis nula del test de Sargan").
+
+**Replicación en R:**
+
+```{r ej1-e}
+Ln <- lagm(n_, 1)                                            # L.n de Stata
+e1 <- gmm_est(n_, list(nL1 = nL1), gmm = list(Ln), step = 1)
+e2 <- gmm_est(n_, list(nL1 = nL1), gmm = list(Ln), step = 2)
+tab <- rbind(`un paso` = c(rho = e1$coef, ee = e1$se, diag_gmm(e1)), `dos pasos` = c(rho = e2$coef, ee = e2$se, diag_gmm(e2)))
+kable(tab, digits = 4)
+c(dif_1paso = dif(c(e1$coef, e1$se), c(1.146045, .0865907)), dif_2pasos = dif(c(e2$coef, e2$se), c(1.176208, .0771686)),
+  dif_Sargan = dif(e1$sargan, 122.88), dif_Hansen = dif(e2$hansen, 48.86),
+  dif_AR = dif(c(ar_test(e1, 1), ar_test(e1, 2), ar_test(e2, 1), ar_test(e2, 2)), c(-4.21, -2.35, -2.97, -1.71)))
+```
+
+> Los resultados coinciden con `xtabond2` en coeficiente, EE, Sargan, Hansen y AR.
+
+## (f) GMM en sistema (Blundell-Bond)
+
+**Enunciado.** Obtenga la estimación de GMM de $\rho$ utilizando todos los instrumentos posibles en niveles para el modelo en primeras diferencias e $\Delta y_{it-1}$ como instrumento para el modelo en niveles.
+
+**Resultado (PDF R):** un paso $\hat\rho$ = 1,107192 (0,0200965), constante −0,1644167 (0,0233703); N = 770; 15 instrumentos; AR(1) = −5,47; AR(2) = −2,27 (p = 0,023); Sargan $\chi^2(13)$ = 168,40 (p = 0,000); Dif-Sargan p = 0,000. Dos pasos: 1,149856 (0,0316392), constante −0,1738829 (0,0370401); AR(1) = −3,18; AR(2) = −1,71 (p = 0,087); Hansen $\chi^2(13)$ = 56,19 (p = 0,000); Dif-Hansen para niveles $\chi^2(4)$ = 7,04 (p = 0,134).
+
+**Solucionario (S):** "Aquí lo que estamos haciendo es implementar el estimador GMM de Blundell-Bond (1998)." (sin comentario sobre los resultados).
+
+> Igual que en 1(e): $\hat\rho>1$ y tests de sobreidentificación que rechazan (ver DISCREPANCIA 3).
+
+**Replicación en R:**
+
+```{r ej1-f}
+f1 <- gmm_est(n_, list(nL1 = nL1), gmm = list(Ln), step = 1, system = TRUE)
+f2 <- gmm_est(n_, list(nL1 = nL1), gmm = list(Ln), step = 2, system = TRUE)
+kable(rbind(`un paso` = c(rho = f1$coef[1], ee = f1$se[1], diag_gmm(f1)), `dos pasos` = c(rho = f2$coef[1], ee = f2$se[1], diag_gmm(f2))), digits = 4)
+rbind(constante_1paso = c(f1$coef[2], f1$se[2]), constante_2pasos = c(f2$coef[2], f2$se[2]))
+c(dif_1paso = dif(c(f1$coef, f1$se), c(1.107192, -.1644167, .0200965, .0233703)),
+  dif_2pasos = dif(c(f2$coef, f2$se), c(1.149856, -.1738829, .0316392, .0370401)),
+  dif_Sargan = dif(f1$sargan, 168.40), dif_Hansen = dif(f2$hansen, 56.19),
+  dif_AR_2pasos = dif(c(ar_test(f2, 1), ar_test(f2, 2)), c(-3.18, -1.71)))
+```
+
+> El test de AR en el caso de un paso **no robusto en sistema** da valores algo distintos a los del PDF (−5,47 / −2,27) por un detalle del cálculo de la varianza en ese caso particular; los coeficientes, errores estándar, Sargan, Hansen y los AR de dos pasos coinciden.
+
+## (g) Efectos fijos de tiempo
+
+**Enunciado.** Repita las estimaciones de los incisos e) y f) incluyendo efectos fijos de tiempo.
+
+**Resultado (PDF R):**
+
+| | $\hat\rho$ (EE) | Instr. | AR(1) | AR(2) | Test de sobreid. |
+|---|---|---|---|---|---|
+| AB un paso | 0,2667934 (0,1114731) | 15 | 0,30 (p = 0,764) | −0,93 (p = 0,351) | Sargan $\chi^2(9)$ = 36,01 (p = 0,000) |
+| AB dos pasos | 0,4092502 (0,0923988) | 15 | −0,90 (p = 0,370) | −1,22 (p = 0,222) | Hansen $\chi^2(9)$ = 11,00 (p = **0,276**) |
+| BB un paso | 1,070702 (0,0198077) | 20 | −6,30 | −2,36 (p = 0,018) | Sargan $\chi^2(13)$ = 79,17 (p = 0,000) |
+| BB dos pasos | 1,115279 (0,0252032) | 20 | −3,22 | −1,56 (p = 0,118) | Hansen $\chi^2(13)$ = 28,91 (p = 0,007) |
+
+**Solucionario (S):** "En las estimaciones que vimos hasta aquí, se rechaza la hipótesis nula del test de Sargan, el cual sabemos que se puede pensar como un test de especificación del modelo. Esto implica que el *Data Generating Process* no es el modelo simple que vimos hasta aquí. Por lo tanto, la idea al incluir efectos fijos de tiempo es ir 'mejorando' el modelo de a poco."
+
+> **⚠️ DISCREPANCIA 4.** (i) (S) afirma que "se rechaza" el test de Sargan en todas las estimaciones; pero con efectos de tiempo el **Hansen robusto de AB en dos pasos ya no rechaza** (p = 0,276) y el AR(2) tampoco rechaza (p = 0,222) — ésta es la única especificación del ejercicio que pasa ambos tests — mientras que BB sigue rechazando (Hansen p = 0,007). (ii) El PDF R no comenta nada. (iii) El AB en un paso con dummies da $\hat\rho=0{,}267$, muy por **debajo de FE (0,870)**, y su AR(1) no rechaza (p = 0,764; con instrumentos válidos debería rechazarse), lo que sugiere una estimación débil/sesgada en un paso. (iv) Las *dummies* que Stata omite por colinealidad no son las mismas en AB (omite `yr1979`) y en BB (omite `yr1980`), lo que cambia los coeficientes reportados de las dummies (no el de $\rho$).
+
+**Replicación en R:**
+
+```{r ej1-g}
+yrAB <- yrs[c("yr1977", "yr1978", "yr1980", "yr1981", "yr1982", "yr1979")]   # AB omite yr1979
+yrBB <- yrs[c("yr1977", "yr1978", "yr1979", "yr1981", "yr1982", "yr1980")]   # BB omite yr1980
+g1 <- gmm_est(n_, c(list(nL1 = nL1), yrAB), gmm = list(Ln), ivfd = yrs, step = 1)
+g2 <- gmm_est(n_, c(list(nL1 = nL1), yrAB), gmm = list(Ln), ivfd = yrs, step = 2)
+g3 <- gmm_est(n_, c(list(nL1 = nL1), yrBB), gmm = list(Ln), ivlev = yrs, system = TRUE, step = 1)
+g4 <- gmm_est(n_, c(list(nL1 = nL1), yrBB), gmm = list(Ln), ivlev = yrs, system = TRUE, step = 2)
+tg <- rbind(`AB 1 paso` = c(rho = g1$coef[1], ee = g1$se[1], diag_gmm(g1)), `AB 2 pasos` = c(rho = g2$coef[1], ee = g2$se[1], diag_gmm(g2)),
+            `BB 1 paso` = c(rho = g3$coef[1], ee = g3$se[1], diag_gmm(g3)), `BB 2 pasos` = c(rho = g4$coef[1], ee = g4$se[1], diag_gmm(g4)))
+kable(tg, digits = 4)
+c(dif_rho_ee = dif(tg[, 1:2], cbind(c(.2667934, .4092502, 1.070702, 1.115279), c(.1114731, .0923988, .0198077, .0252032))),
+  dif_Sargan_Hansen = dif(c(g1$sargan, g2$hansen, g3$sargan, g4$hansen), c(36.01, 11.00, 79.17, 28.91)),
+  dif_AR_robustos = dif(c(ar_test(g2, 1), ar_test(g2, 2), ar_test(g4, 1), ar_test(g4, 2)), c(-.90, -1.22, -3.22, -1.56)))
+round(rbind(AB_2pasos = g2$coef, BB_2pasos = g4$coef[1:6]), 5)         # dummies (distintas por la omitida)
+```
+
+**Resumen del Ejercicio 1** (rango de consistencia: entre FE y OLS):
+
+```{r ej1-resumen}
+res1 <- data.frame(
+  Estimador = c("FE", "OLS", "Anderson-Hsiao", "AB 1 paso", "AB 2 pasos", "BB 1 paso", "BB 2 pasos",
+                "AB 1 paso (+dummies)", "AB 2 pasos (+dummies)", "BB 1 paso (+dummies)", "BB 2 pasos (+dummies)"),
+  rho = c(coef(fe1), coef(ols1)["nL1"], ah1$coef, e1$coef, e2$coef, f1$coef[1], f2$coef[1], g1$coef[1], g2$coef[1], g3$coef[1], g4$coef[1]))
+res1$`dentro de [FE, OLS]` <- res1$rho >= coef(fe1) & res1$rho <= coef(ols1)["nL1"]
+kable(res1, digits = 4)
+```
+
+---
+
+# Ejercicio 2
+
+**Enunciado.** En este ejercicio se ilustrará el hecho de que los estimadores de Arellano-Bond y de Blundell-Bond pueden extenderse en forma directa a modelos que incluyan regresores estrictamente exógenos y regresores secuencialmente exógenos. En su paper original, Arellano y Bond modelaron el empleo de las empresas ($n$) utilizando un modelo de ajuste parcial ..., incluyendo dos rezagos de la variable empleo. Otras variables incluidas fueron el nivel salarial actual y el rezagado ($w$), el stock de capital actual, rezagado una y dos veces ($k$) y la producción agregada actual, rezagada una y dos veces en el sector de la empresa ($ys$). Todas las variables se expresan en logaritmos. También se incluye un conjunto de variables *dummy* de tiempo.
+
+```{r ej2-datos}
+wL1 <- ser("wL1"); kL1 <- ser("kL1"); kL2 <- ser("kL2"); ysL1 <- ser("ysL1"); ysL2 <- ser("ysL2")
+```
+
+## (a) OLS con errores estándar robustos
+
+**Enunciado.** Estime el modelo por OLS. Compute los errores estándar robustos a heterocedasticidad y correlación serial.
+
+**Resultado (PDF R):** N = 632; $R^2$ = 0,9948; 138 clusters; `nL1` 1,083681 (0,0479746); `nL2` −0,1204015 (0,0432502); `w` −0,4314672 (0,1861579); `wL1` 0,3933175 (0,1806983); `k` 0,3214569 (0,0546592); `kL1` −0,2087172 (0,0674584); `kL2` −0,0811552 (0,030786); `ys` 0,5156912 (0,1862924); `ysL1` −0,7065917 (0,2745098); `ysL2` 0,2489473 (0,1450994); constante −0,1238146 (0,2952534). (`yr1977` y `yr1978` se omiten por colinealidad.)
+
+**Replicación en R:**
+
+```{r ej2-a}
+fx <- n ~ nL1 + nL2 + w + wL1 + k + kL1 + kL2 + ys + ysL1 + ysL2
+ols2 <- lm(update(fx, . ~ . + yr1979 + yr1980 + yr1981 + yr1982), d)
+G <- N
+V_ols2 <- vcovCL(ols2, cluster = d$id[as.numeric(rownames(model.frame(ols2)))], type = "HC1")
+ct_ols2 <- coeftest(ols2, vcov. = V_ols2, df = G - 1)
+round(ct_ols2[1:11, 1:2], 7)
+pdf2a <- c(-.1238146, 1.083681, -.1204015, -.4314672, .3933175, .3214569, -.2087172, -.0811552, .5156912, -.7065917, .2489473)
+c(N = nobs(ols2), R2 = round(summary(ols2)$r.squared, 4), dif_coef = dif(ct_ols2[1:11, 1], pdf2a),
+  dif_ee = dif(ct_ols2[1:11, 2], c(.2952534, .0479746, .0432502, .1861579, .1806983, .0546592, .0674584, .030786, .1862924, .2745098, .1450994)))
+```
+
+## (b) FE con errores estándar robustos
+
+**Enunciado.** Estime el modelo por FE. Compute los errores estándar robustos a heterocedasticidad y correlación serial.
+
+**Resultado (PDF R):** N = 632; $R^2$ within = 0,7708; `nL1` 0,712259 (0,0546499); `nL2` −0,2216269 (0,0557228); `w` −0,504334 (0,1902322); `wL1` 0,1750077 (0,1374862); `k` 0,3667223 (0,0660277); `kL1` −0,0648159 (0,052492); `kL2` 0,0287852 (0,0412597); `ys` 0,5252203 (0,1803162); `ysL1` −0,5622163 (0,2111979); `ysL2` 0,1339081 (0,1695363); constante 1,248446 (0,8176095).
+
+**Solucionario (S) para (a) y (b):** "Sabemos que bajo ciertos supuestos, en el modelo de regresión la variable dependiente rezagada está correlacionada positivamente con el error, lo que hace que la estimación por OLS de su coeficiente esté sesgada hacia arriba. Por otra parte, en la estimación de efectos fijos, se subestima el verdadero valor del coeficiente ... Por lo tanto, ... una estimación consistente para el verdadero parámetro debería estar entre estos valores."
+
+**Replicación en R:**
+
+```{r ej2-b}
+fe2 <- plm(update(fx, . ~ . + yr1978 + yr1979 + yr1980 + yr1981), d, index = c("id", "year"), model = "within")
+V_fe2 <- vcovHC(fe2, method = "arellano", type = "HC1", cluster = "group") * G / (G - 1)
+ee_fe2 <- sqrt(diag(V_fe2))
+round(cbind(coef = coef(fe2), ee_robusto = ee_fe2)[1:10, ], 7)
+c(N = nobs(fe2), R2_within = round(summary(fe2)$r.squared[1], 4),
+  dif_coef = dif(coef(fe2)[1:10], c(.712259, -.2216269, -.504334, .1750077, .3667223, -.0648159, .0287852, .5252203, -.5622163, .1339081)),
+  dif_ee = dif(ee_fe2[1:10], c(.0546499, .0557228, .1902322, .1374862, .0660277, .052492, .0412597, .1803162, .2111979, .1695363)))
+```
+
+## (c) Anderson-Hsiao
+
+**Enunciado.** Implemente el estimador de Anderson-Hsiao usando $n_{it-2}$ como instrumento.
+
+**Resultado (PDF R):** N = 494; `D.nL1` **5,823993** (14,07042); `D.nL2` −0,9846567 (2,216574); `D.w` −0,3323156 (0,4888956); `D.wL1` 1,433551 (3,563217); `D.k` 0,0698672 (0,7653782); `D.kL1` −1,708326 (4,482217); `D.kL2` −0,5052786 (1,434586); `D.ys` 1,344045 (1,935232); `D.ysL1` −2,722142 (6,196766); `D.ysL2` −0,1505585 (0,837905); `D.yr1978` 0,0677291; `D.yr1979` 0,1150868; `D.yr1980` 0,1093503; constante 0,1190119 (0,350733). Wald $\chi^2(13)$ = 14,10 (p = 0,3669).
+
+**Solucionario (S):** "Aunque esta estimación debería ser consistente, los resultados obtenidos no son los esperados. El coeficiente del rezago de $n$ está fuera de los límites de sus correspondientes estimaciones de OLS y FE, y, es mucho mayor que la unidad, una condición de estabilidad. Además, vemos que la estimación del error estándar es muy alta, y el coeficiente no es estadísticamente significativo a los niveles convencionales."
+
+**Replicación en R:**
+
+```{r ej2-c}
+dv <- list(nL1 = dm(nL1), nL2 = dm(nL2), w = dm(w_), wL1 = dm(wL1), k = dm(k_), kL1 = dm(kL1), kL2 = dm(kL2),
+           ys = dm(ys_), ysL1 = dm(ysL1), ysL2 = dm(ysL2), yr1978 = dm(yrs$yr1978), yr1979 = dm(yrs$yr1979), yr1980 = dm(yrs$yr1980))
+Xah <- sapply(dv, as.vector); yah <- as.vector(dm(n_)); iv_ah <- as.vector(nL2)
+ok <- complete.cases(Xah, yah, iv_ah)
+X <- cbind(Xah[ok, ], const = 1); Z <- cbind(nL2 = iv_ah[ok], Xah[ok, -1], const = 1)
+ah2 <- iv2sls(yah[ok], X, Z)
+round(cbind(coef = ah2$coef, ee = ah2$se), 6)
+c(N = ah2$n, dif_coef = dif(ah2$coef[c(1, 2, 3, 4)], c(5.823993, -.9846567, -.3323156, 1.433551)),
+  dif_ee = dif(ah2$se[c(1, 2, 3, 4)], c(14.07042, 2.216574, .4888956, 3.563217)))
+```
+
+> **⚠️ DISCREPANCIA 5 (menor).** Para estimar con `ivregress` el modelo del Ejercicio 2(c) el `.do` usa las variables precalculadas (`nL1`, `nL2`, `wL1`, ...) como en 2(a)-(b), mientras que para los GMM de 2(d)-(f) usa los rezagos que calcula Stata (`L(1/2).n`, ...). Por eso 2(a)-(c) usan 632/494 observaciones y 2(d)-(f) usan 414/690: **no son la misma muestra**, y la comparación de $\hat\rho$ entre grupos de incisos mezcla muestras distintas (la comparación contra el intervalo [FE, OLS] del Ejercicio 2 sólo es estrictamente válida dentro de 2(a)-(c)).
+
+## (d) Arellano-Bond (sólo el rezago de $n$ endógeno)
+
+**Enunciado.** Estime la ecuación de empleo usando el estimador de Arellano-Bond. Asuma que la única endogeneidad presente es en el rezago de la variable dependiente.
+
+**Resultado (PDF R):** N = 414; 20 instrumentos. Un paso (robusto): `L.n` 0,5325962 (0,4060438), `L2.n` −0,1678165 (0,108895); AR(1) −0,93 (p = 0,351), AR(2) −1,57 (p = 0,117); Sargan $\chi^2(7)$ = 18,99 (p = 0,008); Hansen = 12,33 (p = 0,090). Dos pasos: `L.n` 0,6080291 (0,6739661), `L2.n` −0,137942 (0,1688863); AR(1) −0,64, AR(2) −1,41 (p = 0,159); Hansen 12,33.
+
+**Solucionario (S):** "Notamos que el coeficiente de la variable dependiente rezagas se encuentra ahora dentro del rango de estabilidad. Sin embargo, en ambas estimaciones encontramos que no es estadísticamente significativo."
+
+**Replicación en R** (se usan los rezagos de Stata, `L.n`, `L2.n`, etc.):
+
+```{r ej2-d}
+yrA <- yrs[c("yr1979", "yr1980", "yr1982", "yr1977", "yr1978", "yr1981")]
+regs2 <- c(list(`L.n` = lagm(n_, 1), `L2.n` = lagm(n_, 2), w = w_, `L.w` = lagm(w_, 1), k = k_, `L.k` = lagm(k_, 1), `L2.k` = lagm(k_, 2),
+                ys = ys_, `L.ys` = lagm(ys_, 1), `L2.ys` = lagm(ys_, 2)), yrA)
+iv_d <- c(list(w_, lagm(w_, 1), k_, lagm(k_, 1), lagm(k_, 2), ys_, lagm(ys_, 1), lagm(ys_, 2)), yrs)
+d1_ <- gmm_est(n_, regs2, gmm = list(lagm(n_, 1)), ivfd = iv_d, step = 1, robust = TRUE)
+d2_ <- gmm_est(n_, regs2, gmm = list(lagm(n_, 1)), ivfd = iv_d, step = 2, robust = TRUE)
+kable(rbind(`un paso` = c(`L.n` = d1_$coef[1], ee = d1_$se[1], `L2.n` = d1_$coef[2], ee2 = d1_$se[2], diag_gmm(d1_)),
+            `dos pasos` = c(`L.n` = d2_$coef[1], ee = d2_$se[1], `L2.n` = d2_$coef[2], ee2 = d2_$se[2], diag_gmm(d2_))), digits = 4)
+c(dif_1paso = dif(c(d1_$coef[1:2], d1_$se[1:2]), c(.5325962, -.1678165, .4060438, .108895)),
+  dif_2pasos = dif(c(d2_$coef[1:2], d2_$se[1:2]), c(.6080291, -.137942, .6739661, .1688863)),
+  dif_Sargan_Hansen = dif(c(d1_$sargan, d1_$hansen), c(18.99, 12.33)),
+  dif_AR = dif(c(ar_test(d1_, 1), ar_test(d1_, 2), ar_test(d2_, 1), ar_test(d2_, 2)), c(-.93, -1.57, -.64, -1.41)))
+```
+
+> **⚠️ DISCREPANCIA 6.** (S) 2(b) dice que "una estimación consistente ... debería estar entre" OLS (1,084) y FE (0,712). Pero las estimaciones de A-B de 2(d) (0,533 en un paso; 0,608 en dos pasos) caen **por debajo de FE**, es decir **fuera de ese intervalo**; (S) sólo observa que están "dentro del rango de estabilidad" ($|\rho|<1$), que es otro criterio. Tampoco se comenta que el test de Sargan rechaza (p = 0,008), que el de Hansen sólo lo hace al 10 % (p = 0,090) y que, como el coeficiente de $\hat\rho$ no es significativo, la especificación identifica mal la persistencia.
+
+## (e) Salarios y capital secuencialmente exógenos
+
+**Enunciado.** Ahora, considere como hicieron Blundell y Bond (1998) que los salarios y el stock de capital no deben tomarse como estrictamente exógenos en este contexto ... Reestime el modelo usando el estimador de A-B y considerando a los salarios y el stock de capital como regresores secuencialmente exógenos.
+
+**Resultado (PDF R):** N = 414; 33 instrumentos. Un paso: `L.n` 0,8328315 (0,1219725), `L2.n` −0,1640736 (0,0770492); AR(1) −3,83, AR(2) −2,12 (p = 0,034); Sargan $\chi^2(20)$ = 38,36 (p = 0,008); Hansen = 22,98 (p = 0,290); dif-Hansen de `ys`, `L.ys`, `L2.ys` y dummies: $\chi^2(6)$ = 8,14 (p = 0,228). Dos pasos: `L.n` 0,9403457 (0,1894165), `L2.n` −0,1526986 (0,0928117); AR(1) −2,47, AR(2) −1,74 (p = 0,081).
+
+**Solucionario (S):** "Ahora, los resultados de la estimación en un paso y en dos pasos parecen razonables."
+
+**Replicación en R:**
+
+```{r ej2-e}
+gm3 <- list(lagm(n_, 1), lagm(w_, 1), lagm(k_, 1))                  # L.(n w k)
+iv_e <- c(list(ys_, lagm(ys_, 1), lagm(ys_, 2)), yrs)
+h1 <- gmm_est(n_, regs2, gmm = gm3, ivfd = iv_e, step = 1, robust = TRUE)
+h2 <- gmm_est(n_, regs2, gmm = gm3, ivfd = iv_e, step = 2, robust = TRUE)
+kable(rbind(`un paso` = c(`L.n` = h1$coef[1], ee = h1$se[1], `L2.n` = h1$coef[2], ee2 = h1$se[2], diag_gmm(h1)),
+            `dos pasos` = c(`L.n` = h2$coef[1], ee = h2$se[1], `L2.n` = h2$coef[2], ee2 = h2$se[2], diag_gmm(h2))), digits = 4)
+c(dif_1paso = dif(c(h1$coef[1:2], h1$se[1:2]), c(.8328315, -.1640736, .1219725, .0770492)),
+  dif_2pasos = dif(c(h2$coef[1:2], h2$se[1:2]), c(.9403457, -.1526986, .1894165, .0928117)),
+  dif_Sargan_Hansen = dif(c(h1$sargan, h1$hansen), c(38.36, 22.98)),
+  dif_AR = dif(c(ar_test(h1, 1), ar_test(h1, 2), ar_test(h2, 1), ar_test(h2, 2)), c(-3.83, -2.12, -2.47, -1.74)))
+```
+
+> Estas estimaciones caen dentro de [FE, OLS] y pasan el test de Hansen: son las únicas del ejercicio que cumplen simultáneamente ambos criterios, lo que respalda la lectura de (S). El AR(2) en un paso (p = 0,034) sí rechaza, aunque no en dos pasos al 5 % (p = 0,081).
+
+## (f) Blundell-Bond (modelo reducido)
+
+**Enunciado.** Adicionalmente, Blundell y Bond (1998) eliminan de su modelo los rezagos más largos (de dos períodos) del empleo y el capital, y prescinden del nivel de producto agregado sectorial. Considerando esta cuestión, compute el estimador de Blundell-Bond.
+
+**Resultado (PDF R):** N = 690; 47 instrumentos. Un paso: `L.n` 0,9025721 (0,0412484), `w` −0,5397871 (0,1984403), `L.w` 0,3047706 (0,1800251), `k` 0,4734141 (0,0900715), `L.k` −0,3942878 (0,086912), constante 0,8194633; AR(1) −4,61, AR(2) −1,18 (p = 0,238); Sargan $\chi^2(37)$ = 86,05 (p = 0,000); Hansen = 52,82 (p = 0,044). Dos pasos: `L.n` 0,892057 (0,0524149), `w` −0,4138471 (0,2405795), `L.w` 0,23221 (0,1663529); AR(1) −4,46, AR(2) −1,27 (p = 0,203).
+
+**Solucionario (S):** "El resultado de la estimación está dentro de los valores esperados."
+
+**Replicación en R:**
+
+```{r ej2-f}
+yrS <- yrs[c("yr1978", "yr1979", "yr1980", "yr1982", "yr1977", "yr1981")]
+regs2f <- c(list(`L.n` = lagm(n_, 1), w = w_, `L.w` = lagm(w_, 1), k = k_, `L.k` = lagm(k_, 1)), yrS)
+s1 <- gmm_est(n_, regs2f, gmm = gm3, ivlev = yrs, system = TRUE, step = 1, robust = TRUE)
+s2 <- gmm_est(n_, regs2f, gmm = gm3, ivlev = yrs, system = TRUE, step = 2, robust = TRUE)
+kable(rbind(`un paso` = c(`L.n` = s1$coef[1], ee = s1$se[1], diag_gmm(s1)), `dos pasos` = c(`L.n` = s2$coef[1], ee = s2$se[1], diag_gmm(s2))), digits = 4)
+c(dif_1paso = dif(c(s1$coef[1:3], s1$se[1:3]), c(.9025721, -.5397871, .3047706, .0412484, .1984403, .1800251)),
+  dif_2pasos = dif(c(s2$coef[1:3], s2$se[1:3]), c(.892057, -.4138471, .23221, .0524149, .2405795, .1663529)),
+  dif_Sargan_Hansen = dif(c(s1$sargan, s1$hansen), c(86.05, 52.82)),
+  dif_AR = dif(c(ar_test(s1, 1), ar_test(s1, 2), ar_test(s2, 1), ar_test(s2, 2)), c(-4.61, -1.18, -4.46, -1.27)))
+```
+
+> Las estimaciones (0,903 y 0,892) están dentro de [FE, OLS] del Ejercicio 2(a)-(b) (aunque, por DISCREPANCIA 5, con otra muestra); el Hansen sigue rechazando al 5 % (p = 0,044).
+
+---
+
+# Ejercicio 3
+
+**Enunciado.** Cuando hay muchos instrumentos, surgen dos problemas principales: sobreestimación (*overfitting*) de la variable endógena y mala estimación de la matriz de pesos $W$. En estos casos, se proponen las siguientes soluciones: (a) probar diferentes especificaciones de IV recortando el número de rezagos en la matriz de instrumentos $\mathbf Z$; (b) colapsar/combinar instrumentos. Si el modelo funciona debería dar resultados similares con distintos instrumentos. Retome el ejercicio 2.e) para ver una aplicación de esta cuestión. Estime el modelo de empleo restringiendo el máximo rezago a 3 y 4 períodos. Por último, estime el modelo colapsando instrumentos. Analice si los resultados obtenidos son robustos.
+
+**Resultado (PDF R):** tabla comparativa (N = 414 en todas las columnas; coeficiente de `nL1` = `L.n`, EE entre paréntesis):
+
+| (1) 2(e) 1 paso | (2) 2(e) 2 pasos | (3) lags ≤ 3, 1 paso | (4) lags ≤ 3, 2 pasos | (5) lags ≤ 4, 1 paso | (6) lags ≤ 4, 2 pasos | (7) collapse, 1 paso | (8) collapse, 2 pasos |
+|---|---|---|---|---|---|---|---|
+| 0,833*** (0,122) | 0,940*** (0,189) | 0,949*** (0,182) | 0,900*** (0,226) | 0,847*** (0,121) | 0,930*** (0,174) | 1,108*** (0,387) | 0,877* (0,455) |
+
+**Solucionario (S):** no resuelve el Ejercicio 3 (ni el 4). El PDF R tampoco incluye el análisis de robustez que pide el enunciado.
+
+> **⚠️ DISCREPANCIA 7.** El enunciado pide **analizar si los resultados son robustos**, pero el PDF R sólo presenta la tabla, sin comentario, y (S) no lo resuelve. A continuación se agrega ese análisis a partir de la replicación. **Aclaración de notación:** el enunciado habla de "restringir el máximo rezago a 3 y 4 períodos" y el `.do` usa `laglimits(1 2)` y `laglimits(1 3)`; no es una inconsistencia porque `gmmstyle(L.(n w k), ...)` aplica los límites a las series ya rezagadas `L.n`, `L.w`, `L.k`: `laglimits(1 2)` equivale a usar $n_{t-2}$ y $n_{t-3}$ (máximo rezago 3) y `laglimits(1 3)` a $n_{t-2},\dots,n_{t-4}$ (máximo rezago 4).
+
+**Replicación en R:**
+
+```{r ej3}
+cfg <- list(list("(3) lags <= 3, 1 paso", c(1, 2), FALSE, 1), list("(4) lags <= 3, 2 pasos", c(1, 2), FALSE, 2),
+            list("(5) lags <= 4, 1 paso", c(1, 3), FALSE, 1), list("(6) lags <= 4, 2 pasos", c(1, 3), FALSE, 2),
+            list("(7) collapse, 1 paso", c(1, 99), TRUE, 1), list("(8) collapse, 2 pasos", c(1, 99), TRUE, 2))
+r3 <- lapply(cfg, function(x) gmm_est(n_, regs2, gmm = gm3, lags = x[[2]], collapse = x[[3]], ivfd = iv_e, step = x[[4]], robust = TRUE))
+r3 <- c(list(h1, h2), r3); nom3 <- c("(1) 2(e) 1 paso", "(2) 2(e) 2 pasos", vapply(cfg, `[[`, "", 1))
+tab3 <- do.call(rbind, lapply(r3, function(r) c(`L.n` = unname(r$coef[1]), EE = unname(r$se[1]), instr = r$ninst,
+                                                `p(Hansen)` = pchisq(r$hansen, r$df, lower.tail = FALSE), AR2 = ar_test(r, 2))))
+rownames(tab3) <- nom3
+kable(tab3, digits = 3)
+c(dif_coef = dif(tab3[, 1], c(.833, .940, .949, .900, .847, .930, 1.108, .877)), dif_ee = dif(tab3[, 2], c(.122, .189, .182, .226, .121, .174, .387, .455)))
+```
+
+**Análisis de robustez.** Los coeficientes de $L.n$ varían entre 0,83 y 1,11 según el conjunto de instrumentos, un rango amplio comparado con los errores estándar (0,12–0,46): (i) acortar los rezagos (columnas 3–6) cambia poco el coeficiente en dos pasos (0,90–0,94) pero lo mueve bastante en un paso (0,83–0,95); (ii) **colapsar** instrumentos reduce mucho la cantidad de instrumentos (de 33 a 18) a costa de errores estándar 2–3 veces mayores (0,39 y 0,46) y un coeficiente que pasa de 1,108 (un paso, mayor que 1 y que OLS) a 0,877 (dos pasos, sólo significativo al 10 %); (iii) el test de Hansen no rechaza en ninguna especificación (ver `p(Hansen)` en la tabla), de modo que no hay evidencia de invalidez de los instrumentos ni de *overfitting* evidente, pero la sensibilidad de la estimación puntual indica que los resultados son **sólo moderadamente robustos**: la conclusión cualitativa (persistencia alta, $\hat\rho\in[0{,}8;1{,}1]$) es estable, pero la magnitud no. Cuanto más se recortan o colapsan los instrumentos, menos precisa es la estimación (compromiso sesgo-varianza típico de la proliferación de instrumentos).
+
+---
+
+# Ejercicio 4
+
+**Enunciado.** Considere nuevamente el modelo del primer ejercicio. Obtenga el estimador LSDVC propuesto por Kiviet (1995) a partir del comando *xtlsdvc*. Luego, estime la matriz de varianzas y covarianzas de los coeficientes de Kiviet siguiendo el procedimiento explicado en clase.
+
+**Resultado (PDF R):** `xtlsdvc n, initial(ah) bias(2)`: $\hat\rho_{LSDVC}$ = 0,9890308 ("SE not computed"). Con dummies de año (`xtlsdvc n yr*`): `L.n` 0,7863675; `yr1978` 0,1430045; `yr1979` 0,1365801; `yr1980` 0,0957011; `yr1981` 0,0105706 (sin errores estándar). El PDF R **no** incluye la matriz de varianzas pedida.
+
+**Solucionario (S):** no resuelve este ejercicio.
+
+> **⚠️ DISCREPANCIA 8.** (i) El enunciado pide estimar la matriz de varianzas y covarianzas de Kiviet, pero el PDF R sólo muestra la salida de `xtlsdvc` con "SE not computed" y no reporta el resultado del procedimiento manual que sí está programado en el `.do` (matrices `ZtZ`, `utu`, `s2`, `V`, `se_lsdvc`, `tstat`, `pvalue`). (ii) En ese procedimiento manual el `.do` estima $\hat\sigma^2$ con denominador $NT-N-T-K+1$ (= 547 con $NT=690$, $N=138$, $T=5$, $K=1$), restando $T$ aunque el modelo 1 **no incluye dummies de tiempo**; el denominador usual de LSDV en ese modelo sería $NT-N-K=551$. (iii) En R no existe un paquete equivalente a `xtlsdvc` (no hay en CRAN una implementación del corrector de Kiviet/Bruno), de modo que **el estimador LSDVC del PDF no pudo replicarse**; abajo se calcula lo que sí es verificable (LSDV, AH inicial y la varianza manual del `.do` tomando como dato el $\hat\rho_{LSDVC}$ del PDF).
+
+**Replicación en R (lo verificable):**
+
+```{r ej4}
+# Datos con el rezago de Stata (L.n): panel balanceado de 138 x 5 = 690 obs.
+yv <- as.vector(t(n_)); xv <- as.vector(t(lagm(n_, 1))); idv <- rep(1:N, each = Tt); okv <- !is.na(xv)
+within <- function(v, g) v - ave(v, g)
+yw <- within(yv[okv], idv[okv]); xw <- within(xv[okv], idv[okv])
+NT <- sum(okv); Tbar <- NT / N
+
+rho_lsdv <- sum(xw * yw) / sum(xw^2)                       # LSDV (sin corregir) = FE
+# Anderson-Hsiao inicial (instrumento: n_{t-2})
+L2 <- lagm(n_, 2); okah <- !is.na(dm(n_)) & !is.na(dm(lagm(n_, 1))) & !is.na(L2)
+rho_ah <- sum(L2[okah] * dm(n_)[okah]) / sum(L2[okah] * dm(lagm(n_, 1))[okah])
+c(NT = NT, T = Tbar, LSDV = rho_lsdv, `AH inicial` = rho_ah, `LSDVC (PDF)` = 0.9890308)
+```
+
+```{r ej4-vcv}
+# Procedimiento manual del .do (con el rho_LSDVC del PDF como dato)
+b <- 0.9890308; K <- 1
+u    <- yw - b * xw
+ZtZ  <- sum(xw^2); utu <- sum(u^2)
+df_do   <- NT - N - Tbar - K + 1                           # denominador del .do
+df_lsdv <- NT - N - K                                      # denominador usual de LSDV (modelo 1)
+v <- function(df) { s2 <- utu / df; se <- sqrt(s2 / ZtZ); t <- b / se; c(s2 = s2, se = se, t = t, p = 2 * pt(-abs(t), NT - K)) }
+round(rbind(`.do: NT-N-T-K+1` = v(df_do), `LSDV usual: NT-N-K` = v(df_lsdv)), 5)
+```
+
+> La diferencia entre los dos denominadores es de menos de 1 %, irrelevante para la inferencia. Tampoco es posible comparar el $\hat\rho$ corregido con el FE del Ejercicio 1(b) (0,870, que usa `nL1` precalculado con 770 obs.): con el rezago de Stata (690 obs.), el LSDV sin corregir ya es 0,951 y `xtlsdvc` lo corrige hasta 0,989 (corrección de ≈ +0,038, esperable porque el sesgo de Nickell es negativo).
+
+---
+
+# Resumen de discrepancias
+
+| # | Ej. | Tipo | Descripción |
+|---|---|---|---|
+| 1 | 1 | **Enunciado vs. datos** | Enunciado: 140 empresas; la base (y todas las salidas del PDF R) tiene 138. "Panel balanceado de 6 años" vale para $n$, pero `nL1` precalculado tiene 58 faltantes → 770 obs. (POLS/FE) vs. 632/414 (GMM, rezagos de Stata). Encabezados 2021 (P) vs. 2022 (S). |
+| 2 | 1(d) | Resolución incompleta | Anderson-Hsiao da $\hat\rho=2{,}016$ (> 1 y fuera de [FE, OLS]); ni R ni S lo comentan. |
+| 3 | 1(e),(f) | **Resolución/solucionario incompletos** | AB y BB dan $\hat\rho>1$ y > OLS, con Sargan/Hansen y AR(2) que rechazan; (S) sólo habla de eficiencia y (R) no comenta. |
+| 4 | 1(g) | **Solucionario vs. salidas** | (S): "se rechaza Sargan"; pero el Hansen robusto de AB en dos pasos con dummies no rechaza (p = 0,276), AB en un paso da 0,267 (muy por debajo de FE) y su AR(1) no rechaza. Dummy omitida distinta en AB (yr1979) y BB (yr1980). |
+| 5 | 2(c)–(f) | Menor | 2(a)–(c) usan rezagos precalculados (632/494 obs.) y 2(d)–(f) los de Stata (414/690): muestras distintas. |
+| 6 | 2(d) | **Solucionario inconsistente** | (S) 2(b): el estimador consistente debe estar entre OLS y FE; pero AB (0,533 / 0,608) cae bajo FE (0,712); (S) sólo usa "rango de estabilidad". No se comenta Sargan (p = 0,008) ni Hansen (p = 0,090). |
+| 7 | 3 | **Resolución incompleta** | El enunciado pide analizar robustez; el PDF R sólo muestra la tabla y (S) no resuelve. Aclaración: "máximo rezago 3 y 4" = `laglimits(1 2)` y `(1 3)` de `L.n`. Se agrega el análisis en este documento. |
+| 8 | 4 | **Resolución incompleta / código / no replicable** | El PDF R no reporta la matriz de varianzas pedida; el `.do` usa $NT-N-T-K+1$ (resta $T$ sin dummies de tiempo); en R no existe `xtlsdvc`: el LSDVC no pudo replicarse (sí LSDV, AH y la varianza manual). |

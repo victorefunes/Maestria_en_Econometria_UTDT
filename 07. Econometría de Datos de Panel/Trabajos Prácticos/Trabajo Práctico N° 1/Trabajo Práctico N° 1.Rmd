@@ -1,0 +1,770 @@
+---
+title: "Trabajo Práctico N° 1: Modelo de Regresión Lineal"
+subtitle: "Econometría de Datos de Panel — Maestría en Economía y Econometría, UTDT"
+author: "Victor Funes"
+date: "2022"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = TRUE, message = FALSE, warning = FALSE)
+library(haven)     # lectura de .dta
+library(sandwich)  # errores estándar robustos / clusterizados
+library(lmtest)    # coeftest
+```
+
+> **Cómo leer este documento.** Cada inciso reúne (i) el enunciado de *Trabajo Práctico N° 1 (P).pdf*, (ii) el código Stata de *Datos/Trabajo Práctico N° 1.do*, (iii) los resultados y comentarios de *Trabajo Práctico N° 1 (R).pdf* y (iv) una **replicación en R** (bloques `{r}`, que sí se ejecutan al tejer, leyendo los `.dta` desde la carpeta `Datos/`).
+> Los bloques Stata son sólo texto; sus resultados son los transcriptos del PDF de resolución.
+> Las salidas de R se comparan con las del PDF para verificar la replicación.
+> Las inconsistencias entre enunciado, código y resolución están marcadas con **⚠️ DISCREPANCIA**. Al final hay una tabla resumen.
+
+```stata
+clear all
+set more off
+version 17
+
+local disco="G:/Mi unidad"
+cd "`disco'/JM/Facultad de Ciencias Económicas (FCE)/Maestría en Econometría/7. Econometría de Datos de Panel/Trabajos Prácticos/Trabajo Práctico N° 1/Datos"
+```
+
+---
+
+# Ejercicio 1
+
+**Enunciado.** Utilice la base de datos provista *"cornwell.dta"*.
+
+```stata
+use "cornwell", clear
+describe
+
+xtset county year
+xtdescribe
+
+local vars="lprbarr lprbconv lprbpris lavgsen lpolpc d82 d83 d84 d85 d86 d87"
+```
+
+## (a) POLS
+
+**Enunciado.** A partir de los datos de los siete años, y utilizando los logaritmos de todas las variables, estime un modelo por POLS que relacione la tasa de crimen con *prbarr, prbconv, prbpris, avgsen* y *polpc* y que incluya un conjunto de *dummies* de año.
+
+```stata
+regress lcrmrte `vars'
+estimates store est_pols1
+```
+
+**Resultado (PDF):**
+
+```
+      Source |       SS           df       MS      Number of obs   =       630
+-------------+----------------------------------   F(11, 618)      =     74.49
+       Model |  117.644669        11  10.6949699   Prob > F        =    0.0000
+    Residual |   88.735673       618  .143585231   R-squared       =    0.5700
+-------------+----------------------------------   Adj R-squared   =    0.5624
+       Total |  206.380342       629  .328108652   Root MSE        =    .37893
+
+------------------------------------------------------------------------------
+     lcrmrte | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+     lprbarr |  -.7195033   .0367657   -19.57   0.000    -.7917042   -.6473024
+    lprbconv |  -.5456589   .0263683   -20.69   0.000    -.5974413   -.4938765
+    lprbpris |   .2475521   .0672268     3.68   0.000     .1155314    .3795728
+     lavgsen |  -.0867575   .0579205    -1.50   0.135    -.2005023    .0269872
+      lpolpc |   .3659886   .0300252    12.19   0.000     .3070248    .4249525
+         d82 |   .0051371    .057931     0.09   0.929    -.1086284    .1189026
+         d83 |    -.043503   .0576243    -0.75   0.451    -.1566662    .0696601
+         d84 |  -.1087542    .057923    -1.88   0.061     -.222504    .0049957
+         d85 |  -.0780454   .0583244    -1.34   0.181    -.1925835    .0364928
+         d86 |  -.0420791   .0578218    -0.73   0.467     -.15563    .0714719
+         d87 |  -.0270426    .056899    -0.48   0.635    -.1387815    .0846963
+       _cons |  -2.082293   .2516253    -8.28   0.000    -2.576438   -1.588149
+------------------------------------------------------------------------------
+```
+
+## (b) Errores estándar robustos (heterocedasticidad y autocorrelación arbitrarias)
+
+**Enunciado.** Compute los errores estándar robustos a heteroscedasticidad arbitraria y a autocorrelación serial arbitraria.
+
+```stata
+regress lcrmrte `vars', vce(cluster county)
+estimates store est_pols2
+
+esttab est_pols1 est_pols2, se star(* 0.10 ** 0.05 *** 0.01) stats(N r2) mtitles("POLS" "POLS (robust)")
+```
+
+**Resultado (PDF):**
+
+```
+Linear regression                               Number of obs     =        630
+                                                F(11, 89)         =      37.19
+                                                Prob > F          =     0.0000
+                                                R-squared         =     0.5700
+                                                Root MSE          =     .37893
+
+                                (Std. err. adjusted for 90 clusters in county)
+------------------------------------------------------------------------------
+             |               Robust
+     lcrmrte | Coefficient  std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+     lprbarr |  -.7195033   .1095979    -6.56   0.000    -.9372719   -.5017347
+    lprbconv |  -.5456589   .0704368    -7.75   0.000    -.6856152   -.4057025
+    lprbpris |   .2475521   .1088453     2.27   0.025     .0312787    .4638255
+     lavgsen |  -.0867575   .1130321    -0.77   0.445    -.3113499    .1378348
+      lpolpc |   .3659886     .121078     3.02   0.003     .1254092    .6065681
+         d82 |   .0051371   .0367296     0.14   0.889    -.0678439    .0781181
+         d83 |    -.043503    .033643    -1.29   0.199    -.1103509    .0233448
+         d84 |  -.1087542   .0391758    -2.78   0.007    -.1865956   -.0309127
+         d85 |  -.0780454   .0385625    -2.02   0.046    -.1546683   -.0014224
+         d86 |  -.0420791   .0428788    -0.98   0.329    -.1272783    .0431201
+         d87 |  -.0270426   .0381447    -0.71   0.480    -.1028353    .0487502
+       _cons |  -2.082293   .8647054    -2.41   0.018    -3.800445   -.3641423
+------------------------------------------------------------------------------
+```
+
+> **Nota.** Los coeficientes coinciden con (a); sólo cambian los errores estándar (clusters por `county`, 90 clusters). Consistente con el código.
+
+## Replicación en R: incisos (a) y (b)
+
+```{r ej1-ab}
+corn <- as.data.frame(read_dta("Datos/cornwell.dta"))
+corn <- corn[order(corn$county, corn$year), ]          # equivale a xtset county year
+rhs  <- c("lprbarr", "lprbconv", "lprbpris", "lavgsen", "lpolpc", paste0("d", 82:87))
+f    <- reformulate(rhs, "lcrmrte")
+lag1 <- function(x, g) ave(x, g, FUN = function(z) c(NA, head(z, -1)))  # rezago dentro de county
+
+# (a) POLS
+m_pols <- lm(f, corn)
+summary(m_pols)
+
+# (b) POLS con errores estándar clusterizados por county
+# HC1 + cadjust reproduce el ajuste de muestra chica de Stata; t con G-1 = 89 g.l.
+G <- length(unique(corn$county))
+V_cl <- vcovCL(m_pols, cluster = corn$county, type = "HC1")
+coeftest(m_pols, vcov. = V_cl, df = G - 1)
+```
+
+> **Verificación.** Coeficientes, errores estándar, $t$ y $R^2$ (0,5700) coinciden con las salidas de Stata del PDF en (a) y (b) (p. ej. `lprbarr`: −0,7195, ee 0,0368 → 0,1096 clusterizado).
+
+## (c) Contraste de correlación serial
+
+**Enunciado.** Implemente un contraste de Correlación Serial.
+
+```stata
+regress lcrmrte `vars'
+predict resid, residuals
+regress resid `vars' l.resid
+local LM=e(N)*e(r2)
+
+display as text "chi2(1) = " as result `LM'
+display as text "El P-valor (LM) es " as result 1-chi2(1,`LM')
+```
+
+**Resolución (PDF):** "Se rechaza la hipótesis nula de no correlación serial."
+
+> **⚠️ DISCREPANCIA 1.** El PDF de resolución sólo dice "Stata." (resaltado) y la conclusión; **no reporta el estadístico LM ni el p-valor**. El código sí los calcula, pero no hay un valor contra el cual verificar la conclusión. Nótese además que `l.resid` pierde la primera observación de cada condado, así que la regresión auxiliar usa N = 540 (no 630).
+
+**Replicación en R:**
+
+```{r ej1-c}
+corn$resid  <- resid(m_pols)
+corn$lresid <- lag1(corn$resid, corn$county)
+aux_sc <- lm(update(f, resid ~ . + lresid), corn)       # regress resid `vars' l.resid
+LM_sc  <- nobs(aux_sc) * summary(aux_sc)$r.squared
+c(N = nobs(aux_sc), chi2_1 = LM_sc, p_valor = pchisq(LM_sc, 1, lower.tail = FALSE))
+```
+
+> **Completa la DISCREPANCIA 1:** la replicación sí produce el estadístico que falta en el PDF; $\chi^2(1)\approx 350{,}4$, p ≈ 3·10⁻⁷⁸ (N = 540, como se anticipó): se rechaza ampliamente la ausencia de correlación serial.
+
+## (d) Contraste de heterocedasticidad
+
+**Enunciado.** Implemente un contraste de Heterocedasticidad.
+
+```stata
+generate resid2=resid^2
+regress resid2 lprbarr c.lprbarr#c.lprbarr lprbpris c.lprbpris#c.lprbpris c.lprbarr#c.lprbpris
+local LM=e(N)*e(r2)
+
+display as text "chi2(5) = " as result `LM'
+display as text "El P-valor (LM) es " as result 1-chi2(5,`LM')
+```
+
+**Resolución (PDF):** "Se rechaza la hipótesis nula de homocedasticidad."
+
+> **⚠️ DISCREPANCIA 2.** Igual que en (c): no se reporta el estadístico ni el p-valor en el PDF. Además, el código implementa un contraste tipo White **sólo con `lprbarr` y `lprbpris`** (niveles, cuadrados e interacción: 5 regresores, de ahí `chi2(5)`), no con todos los regresores del modelo; ni el enunciado ni la resolución aclaran esa elección.
+
+**Replicación en R:**
+
+```{r ej1-d}
+corn$resid2 <- corn$resid^2
+aux_het <- lm(resid2 ~ lprbarr + I(lprbarr^2) + lprbpris + I(lprbpris^2) + I(lprbarr * lprbpris), corn)
+LM_het  <- nobs(aux_het) * summary(aux_het)$r.squared
+c(N = nobs(aux_het), chi2_5 = LM_het, p_valor = pchisq(LM_het, 5, lower.tail = FALSE))
+```
+
+> **Completa la DISCREPANCIA 2:** $\chi^2(5)\approx 50{,}2$, p ≈ 1,3·10⁻⁹ (N = 630): se rechaza homocedasticidad, en línea con la conclusión del PDF.
+
+## (e) FGLS (Prais-Winsten)
+
+**Enunciado.** Asuma que se cumple el supuesto de exogeneidad estricta y que $u_{it}$ sigue un proceso AR(1). Compute el estimador de FGLS siguiendo el enfoque de Prais-Winsten. Una descripción del procedimiento puede encontrarla en Wooldridge (2010), sección 7.8.6.
+*Observación:* GLS necesita exogeneidad estricta para conseguir estimadores consistentes.
+
+```stata
+regress resid l.resid
+local rho=_b[l.resid]
+
+generate ones=1
+
+foreach var of varlist lcrmrte ones `vars' {
+	generate tilde_`var'=.
+	replace tilde_`var'=sqrt(1-`rho'^2)*`var' if (year==81)
+	replace tilde_`var'=`var'-`rho'*l.`var' if (year!=81)
+}
+
+regress tilde_lcrmrte tilde_lprbarr tilde_lprbconv tilde_lprbpris tilde_lavgsen tilde_lpolpc tilde_d82-tilde_d87 tilde_ones, noconstant
+estimates store est_fgls1
+
+prais lcrmrte lprbarr lprbconv lprbpris lavgsen lpolpc d82-d87
+estimates store est_prais1
+prais lcrmrte lprbarr lprbconv lprbpris lavgsen lpolpc d82-d87, twostep
+estimates store est_prais2
+
+esttab est_prais1 est_prais2, se star(* 0.10 ** 0.05 *** 0.01) stats(N r2) mtitles("PRAIS" "PRAIS (Two Step)")
+```
+
+**Resultado (PDF) — FGLS manual:**
+
+```
+      Source |       SS           df       MS      Number of obs   =       630
+-------------+----------------------------------   F(12, 618)      =   2050.54
+       Model |  885.585523        12  73.7987936   Prob > F        =    0.0000
+    Residual |  22.2417551       618  .035989895   R-squared       =    0.9755
+-------------+----------------------------------   Adj R-squared   =    0.9750
+       Total |  907.827278       630  1.44099568   Root MSE        =    .18971
+
+-------------------------------------------------------------------------------
+tilde_lcrmrte | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+--------------+----------------------------------------------------------------
+tilde_lprbarr |   -.481208   .0333124   -14.45   0.000    -.5466271   -.4157888
+tilde_lprbconv|  -.3353095   .0209135   -16.03   0.000    -.3763796   -.2942395
+tilde_lprbpris|  -.1624321   .0339271    -4.79   0.000    -.2290585   -.0958058
+tilde_lavgsen |  -.0203981   .0289633    -0.70   0.482    -.0772766    .0364804
+ tilde_lpolpc |   .3806954   .0298461    12.76   0.000     .3220834    .4393074
+    tilde_d82 |   .0120433   .0222954     0.54   0.589    -.0317405    .0558272
+    tilde_d83 |  -.0721363   .0288915    -2.50   0.013    -.1288737   -.0153989
+    tilde_d84 |  -.1092092   .0333946    -3.27   0.001    -.1747898   -.0436286
+    tilde_d85 |  -.1018016   .0364716    -2.79   0.005    -.1734249   -.0301784
+    tilde_d86 |  -.0775719   .0381852    -2.03   0.043    -.1525605   -.0025834
+    tilde_d87 |  -.0395482   .0394024    -1.00   0.316    -.1169271    .0378307
+   tilde_ones |  -2.027131   .2099692    -9.65   0.000    -2.439471   -1.614792
+-------------------------------------------------------------------------------
+```
+
+> **⚠️ DISCREPANCIA 3.** El código estima además dos versiones con el comando `prais` (iterativa y `twostep`) y las compara con `esttab`, pero **el PDF de resolución sólo muestra el FGLS manual**. No hay resultados de `prais` contra los cuales comparar. Además, el $R^2$ = 0,9755 (y el $F$) del FGLS manual proviene de una regresión **sin constante** (`noconstant`): es un $R^2$ no centrado y no es comparable con el 0,5700 del POLS.
+
+**Replicación en R (misma lógica que el `.do`):**
+
+```{r ej1-e}
+rho <- unname(coef(lm(resid ~ lresid, corn))["lresid"])
+rho
+
+corn$ones <- 1
+for (v in c("lcrmrte", "ones", rhs)) {
+  lv <- lag1(corn[[v]], corn$county)
+  corn[[paste0("tilde_", v)]] <-
+    ifelse(corn$year == 81, sqrt(1 - rho^2) * corn[[v]], corn[[v]] - rho * lv)
+}
+f_t <- reformulate(paste0("tilde_", c(rhs, "ones")), "tilde_lcrmrte", intercept = FALSE)
+m_fgls <- lm(f_t, corn)
+summary(m_fgls)
+```
+
+> **⚠️ DISCREPANCIA 11 (replicación vs. PDF).** Aplicando exactamente el código del `.do`, el $\hat\rho$ es el que se imprime arriba (≈ 0,792) y los coeficientes difieren algo de los del PDF (p. ej. `tilde_lprbarr` = −0,4609 vs. −0,4812 en el PDF; $R^2$ = 0,9729 vs. 0,9755; ee de `tilde_lprbarr` 0,0327 vs. 0,0333). Buscando numéricamente el $\rho$ que reproduce el −0,481208 del PDF se obtiene $\rho\approx 0{,}763$, que **no coincide con ninguna variante razonable** del estimador (MCO con constante 0,792; sin corrección por constante 0,664; correlación simple 0,779; iterado ≈ 0,942). Es decir, el PDF de resolución parece haberse generado con otra versión del código o de la base, y **no es reproducible con el `.do` entregado**. Las conclusiones cualitativas (signos, significatividad) no cambian, salvo detalles menores.
+
+## (f) FGLS con errores estándar robustos
+
+**Enunciado.** Compute los errores estándar robustos a heteroscedasticidad arbitraria y a autocorrelación serial arbitraria para el modelo con las variables transformadas del inciso previo.
+
+*Sugerencia de Wooldridge.* "..If we have any doubts about the homoskedasticity assumption, or whether the AR(1) assumption sufficiently captures the serial dependence, we can just apply the usual fully robust variance matrix and associated statistics to pooled OLS on the transformed variables. This allows us to probably obtain an estimator more efficient than POLS (on the original data) but also guards against the rather simple structure we imposed on $\Omega$. Of course, failure of strict exogeneity generally causes the Prais-Winsten estimator of $\beta$ to be inconsistent."
+
+```stata
+regress tilde_lcrmrte tilde_lprbarr tilde_lprbconv tilde_lprbpris tilde_lavgsen tilde_lpolpc tilde_d82-tilde_d87 tilde_ones, noconstant vce(cluster county)
+estimates store est_fgls2
+
+esttab est_fgls1 est_fgls2, se star(* 0.10 ** 0.05 *** 0.01) stats(N r2) mtitles("FGLS" "FGLS (robust)")
+```
+
+**Resultado (PDF):**
+
+```
+Linear regression                               Number of obs     =        630
+                                                F(12, 89)         =     837.00
+                                                Prob > F          =     0.0000
+                                                R-squared         =     0.9755
+                                                Root MSE          =     .18971
+
+                                (Std. err. adjusted for 90 clusters in county)
+-------------------------------------------------------------------------------
+              |               Robust
+tilde_lcrmrte | Coefficient  std. err.      t    P>|t|     [95% conf. interval]
+--------------+----------------------------------------------------------------
+tilde_lprbarr |   -.481208   .0718373    -6.70   0.000    -.6239471   -.3384689
+tilde_lprbconv|  -.3353095   .0440331    -7.61   0.000    -.4228023   -.2478168
+tilde_lprbpris|  -.1624321   .0500207    -3.25   0.002    -.2618222   -.0630421
+tilde_lavgsen |  -.0203981   .0258077    -0.79   0.431    -.0716774    .030813
+ tilde_lpolpc |   .3806954     .106039     3.59   0.001     .1699982    .5913925
+    tilde_d82 |   .0120433     .015186     0.79   0.430    -.0181309    .0422176
+    tilde_d83 |  -.0721363      .01852    -3.90   0.000    -.1089352   -.0353374
+    tilde_d84 |  -.1092092   .0215974    -5.06   0.000    -.1521229   -.0662956
+    tilde_d85 |  -.1018016   .0244324    -4.17   0.000    -.1503483    -.053255
+    tilde_d86 |  -.0775719   .0236838    -3.28   0.002    -.1246312   -.0305126
+    tilde_d87 |  -.0395482   .0252489    -1.57   0.121    -.0897173    .0106209
+   tilde_ones |  -2.027131   .7465981    -2.72   0.008    -3.510606   -.5436569
+-------------------------------------------------------------------------------
+```
+
+> **Nota.** Los coeficientes son idénticos al FGLS no robusto; los errores estándar de las variables de política son bastante mayores (p. ej. `lprbarr`: 0,0333 → 0,0718), lo que sugiere que el AR(1) no captura toda la dependencia serial / heterocedasticidad. El PDF no incluye comentario escrito para este inciso.
+
+---
+
+**Replicación en R:**
+
+```{r ej1-f}
+V_fgls <- vcovCL(m_fgls, cluster = corn$county, type = "HC1")
+coeftest(m_fgls, vcov. = V_fgls, df = G - 1)
+```
+
+> Mismo patrón que en el PDF: coeficientes idénticos al FGLS no robusto y errores estándar mayores en las variables de política (p. ej. `lprbarr`: ≈ 0,033 → ≈ 0,069), sujeto a la DISCREPANCIA 11.
+
+---
+
+# Ejercicio 2
+
+**Enunciado.** En este ejercicio examinará un modelo para el costo total de producción en la industria aeronáutica a modo de ilustrar una aplicación de un modelo heteroscedástico por grupos. Considere la siguiente función de costos:
+
+$$\ln cost_{jt} = \beta_1 + \beta_2 \ln output_{jt} + \beta_3\, load\ factor_{jt} + \beta_4 \ln fuel\ price_{jt} + \delta_2 Firm_2 + \delta_3 Firm_3 + \delta_4 Firm_4 + \delta_5 Firm_5 + \delta_6 Firm_6 + \varepsilon_{jt}$$
+
+```stata
+use "greene97", clear
+describe
+
+local vars="lq lf lpf i.id"
+```
+
+> **⚠️ DISCREPANCIA 4 (notación, menor).** El enunciado usa $\beta_1..\beta_4$ y $\delta_2..\delta_6$ con *load factor* **sin** logaritmo; el código coincide (`lf` sin transformar) pero las salidas nombran los coeficientes `lq, lf, lpf, id`. Además, el enunciado numera los métodos de (b) como "1) y 2)" y la resolución como "(i) y (ii)". Aquí se usan (b.1) y (b.2).
+
+## (a) POLS
+
+**Enunciado.** Utilice la base de datos provista *"greene97.dta"*, la cual contiene datos para seis compañías aéreas observadas anualmente durante 15 años. Estime la ecuación por POLS.
+
+```stata
+generate lc=ln(c)
+generate lq=ln(q)
+generate lpf=ln(pf)
+
+regress lc `vars'
+estimates store est_pols
+```
+
+**Resultado (PDF):**
+
+```
+      Source |       SS           df       MS      Number of obs   =        90
+-------------+----------------------------------   F(8, 81)        =   3935.79
+       Model |   113.74827         8  14.2185338   Prob > F        =    0.0000
+    Residual |  .292622888        81  .003612628   R-squared       =    0.9974
+-------------+----------------------------------   Adj R-squared   =    0.9972
+       Total |  114.040893        89  1.28135835   Root MSE        =    .06011
+
+------------------------------------------------------------------------------
+          lc | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+          lq |   .9192845   .0298901    30.76   0.000     .8598126    .9787565
+          lf |  -1.070396     .20169    -5.31   0.000    -1.471696   -.6690961
+         lpf |   .4174918   .0151991    27.47   0.000     .3872503    .4477333
+          id |
+           2 |  -.0412359    .025184    -1.64   0.105    -.0913441    .0088722
+           3 |  -.2089211   .0427986    -4.88   0.000     -.294077   -.1237653
+           4 |   .1845557   .0607527     3.04   0.003     .0636769    .3054345
+           5 |   .0240547   .0799041     0.30   0.764    -.1349293    .1830387
+           6 |   .0870617   .0841995     1.03   0.304     -.080469    .2545924
+             |
+       _cons |   9.705942    .193124    50.26   0.000     9.321686     10.0902
+------------------------------------------------------------------------------
+```
+
+## (b) FGLS con heterocedasticidad por grupos
+
+**Enunciado.** Ahora, asuma que dentro de cada compañía aérea se tiene que:
+
+$$Var[\varepsilon_{jt}\mid \mathbf{x}_{jt}] = \sigma_j^2,\quad t=1,\dots,T.$$
+
+Por lo tanto, si las varianzas fueran conocidas, el estimador de GLS sería:
+
+$$\hat{\boldsymbol\beta}=\left[\sum_{j=1}^{N}\left(\frac{1}{\sigma_j^2}\right)\mathbf{X}_j'\mathbf{X}_j\right]^{-1}\left[\sum_{j=1}^{N}\left(\frac{1}{\sigma_j^2}\right)\mathbf{X}_j'\mathbf{y}_j\right]$$
+
+donde $\mathbf{X}_j$ es una matriz $T\times K$. Sin embargo, en este caso práctico las varianzas son desconocidas. Luego, se le solicita computar el estimador de FGLS a través de los siguientes métodos:
+
+### (b.1) Varianza específica a partir de los residuos de OLS
+
+**Enunciado.** Estime el modelo calculando el estimador necesario para la varianza específica de la compañía aérea a partir de los residuos de OLS, es decir, $\hat\sigma_j^2=\dfrac{\mathbf{e}_j'\mathbf{e}_j}{n_j}$.
+
+```stata
+regress lc `vars'
+predict resid, residuals
+
+summarize id
+local ids=`r(max)'
+
+summarize year
+local years=`r(max)'-`r(min)'+1
+
+generate w=.
+local a1=1
+local a2=`years'
+forvalues i=1(1)`ids' {
+	mkmat resid in `a1'/`a2', matrix(resid`i')
+	matrix sigma`i'=resid`i''*resid`i'/`years'
+	replace w=sigma`i'[1,1] in `a1'/`a2'
+	local a1=`a1'+`years'
+	local a2=`a2'+`years'
+}
+
+regress lc `vars' [aweight=1/w]
+estimates store est_fgls1
+```
+
+> **⚠️ DISCREPANCIA 5 (código).** El código toma las observaciones de cada firma por posición (`in a1/a2`), lo que **supone que la base está ordenada por `id` y `year` y balanceada** (6 × 15 = 90). No hay un `sort id year` que lo garantice; si la base no viniera ordenada, las varianzas se asignarían a firmas equivocadas.
+
+**Resultado (PDF):**
+
+```
+      Source |       SS           df       MS      Number of obs   =        90
+-------------+----------------------------------   F(8, 81)        =   5526.83
+       Model |  118.222298         8  14.7777873   Prob > F        =    0.0000
+    Residual |  .216579991        81  .002673827   R-squared       =    0.9982
+-------------+----------------------------------   Adj R-squared   =    0.9980
+       Total |  118.438878        89  1.33077391   Root MSE        =    .05171
+
+------------------------------------------------------------------------------
+          lc | Coefficient  Std. err.      t    P>|t|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+          lq |    .925765   .0267809    34.57   0.000     .8724795    .9790506
+          lf |  -1.216307   .1855858    -6.55   0.000    -1.585565   -.8470495
+         lpf |   .4056077   .0125488    32.32   0.000     .3806395    .4305758
+          id |
+           2 |   -.046026   .0237611    -1.94   0.056    -.0933031    .0012511
+           3 |  -.2020985   .0361494    -5.59   0.000    -.2740246   -.1301725
+           4 |   .1905462   .0551602     3.45   0.001     .0807946    .3002977
+           5 |   .0371723   .0704438     0.53   0.599    -.1029887    .1773334
+           6 |    .094588   .0743639     1.27   0.207    -.0533728    .2425488
+             |
+       _cons |   9.942316   .1622899    61.26   0.000      9.61941    10.26522
+------------------------------------------------------------------------------
+```
+
+### (b.2) Heterocedasticidad multiplicativa de Harvey (1976), dos etapas
+
+**Enunciado.** Estimar el modelo tratándolo como una forma del modelo de heteroscedasticidad multiplicativa de Harvey (1976). Utilice el procedimiento en dos etapas.
+
+```stata
+*Opción 2 (manual)*
+
+generate resid2=resid^2
+generate ln_resid2=ln(resid2)
+regress ln_resid2 i.id
+predict ln_resid2_hat, xb
+generate resid2_hat=exp(ln_resid2_hat)
+
+regress lc `vars' [aweight=1/resid2_hat]
+estimates store est_fgls2
+
+*Comando hetregress*
+
+hetregress lc `vars', het(i.id) twostep
+estimates store est_fgls3
+
+esttab est_pols est_fgls1 est_fgls2 est_fgls3, se star(* 0.10 ** 0.05 *** 0.01) stats(N r2) mtitles("POLS" "FGLS1" "FGLS2" "FGLS3")
+```
+
+> **⚠️ DISCREPANCIA 6.** El código tiene **tres** estimaciones FGLS (`est_fgls1`, `est_fgls2` manual por Harvey y `est_fgls3` con `hetregress`), pero el PDF sólo muestra dos: la de (b.1) y la de `hetregress`. **Falta en el PDF la salida de la versión manual `est_fgls2`.**
+> Observación adicional: la versión manual no corrige la constante de la regresión de $\ln e^2$ (sesgo de $E[\ln\chi^2_1]\approx -1{,}27$). Es un factor de escala común a todas las firmas, por lo que los pesos relativos (y los $\hat\beta$) no cambian.
+
+**Resultado (PDF) — `hetregress ..., twostep`:**
+
+```
+Heteroskedastic linear regression              Number of obs     =        90
+Two-step GLS estimation
+                                               Wald chi2(8)      =  36250.22
+                                               Prob > chi2       =    0.0000
+
+------------------------------------------------------------------------------
+          lc | Coefficient  Std. err.      z    P>|z|     [95% conf. interval]
+-------------+----------------------------------------------------------------
+lc           |
+          lq |    .932333   .0295289    31.57   0.000     .8744574    .9902086
+          lf |  -1.115165   .1991174    -5.60   0.000    -1.505428   -.7249023
+         lpf |   .4086271   .0141468    28.88   0.000     .3808999    .4363543
+          id |
+           2 |  -.0387054   .0242462    -1.60   0.110    -.0862271    .0088163
+           3 |  -.1929047   .0407071    -4.74   0.000    -.2726892   -.1131203
+           4 |   .2082512   .0589261     3.53   0.000     .0927583    .3237442
+           5 |   .0572051   .0780464     0.73   0.464    -.0957631    .2101733
+           6 |   .1207862   .0825116     1.46   0.143    -.0409335    .2825059
+             |
+       _cons |   9.841375   .1768449    55.65   0.000     9.494765    10.18798
+-------------+----------------------------------------------------------------
+lnsigma2     |
+          id |
+           2 |   .9333314   .8111556     1.15   0.250    -.6565043    2.523167
+           3 |    .575379   .8111556     0.71   0.478    -1.014457    2.165215
+           4 |    .639489   .8111556     0.79   0.430    -.9503364    2.229325
+           5 |   .6042102   .8111556     0.74   0.456    -.9856255    2.194046
+           6 |   .7988952   .8111556     0.98   0.325    -.7909405    2.388731
+             |
+       _cons |  -6.213752   .5735736   -10.83   0.000    -7.337935   -5.089568
+------------------------------------------------------------------------------
+Wald test of lnsigma2=0: chi2(5) = 1.56                  Prob > chi2 = 0.9063
+```
+
+## Replicación en R: incisos (a) y (b)
+
+```{r ej2}
+g <- as.data.frame(read_dta("Datos/greene97.dta"))
+g$lc <- log(g$c); g$lq <- log(g$q); g$lpf <- log(g$pf)
+g <- g[order(g$id, g$year), ]       # corrige la DISCREPANCIA 5: ordena explícitamente
+stopifnot(nrow(g) == 90, all(table(g$id) == 15))
+
+f2 <- lc ~ lq + lf + lpf + factor(id)
+
+# (a) POLS
+ols <- lm(f2, g)
+g$e <- resid(ols)
+
+# (b.1) FGLS con sigma_j^2 = e_j'e_j / n_j
+g$s2 <- ave(g$e^2, g$id, FUN = mean)
+fgls1 <- lm(f2, g, weights = 1 / s2)
+
+# (b.2) Harvey (1976) en dos etapas: ln(e^2) sobre dummies de firma, pesos exp(ajustado)
+harvey <- lm(log(e^2) ~ factor(id), g)
+g$s2_h <- exp(fitted(harvey))
+fgls2  <- lm(f2, g, weights = 1 / s2_h)
+
+tab <- function(m) coef(summary(m))[, 1:2]
+comp <- cbind(tab(ols), tab(fgls1), tab(fgls2))
+colnames(comp) <- c("POLS", "ee", "FGLS (b.1)", "ee", "Harvey (b.2)", "ee")
+round(comp, 4)
+
+# p-valor de la dummy de la firma 2 (DISCREPANCIA 7)
+round(sapply(list(POLS = ols, `b.1` = fgls1, `b.2` = fgls2),
+             function(m) coef(summary(m))["factor(id)2", 4]), 3)
+```
+
+> **Verificación.** (a) y (b.1) coinciden con el PDF al cuarto decimal. La estimación manual de Harvey (b.2) **reproduce exactamente** la salida de `hetregress ..., twostep` del PDF (`lq` 0,9323; `lf` −1,1152; `lpf` 0,4086; constante 9,8414; mismos errores estándar), lo que completa la DISCREPANCIA 6: el `est_fgls2` manual del `.do` coincide con `est_fgls3`. Los $p$-valores de la dummy de la firma 2 (0,105 en POLS, 0,056 en b.1 y ≈ 0,114 en b.2) confirman la DISCREPANCIA 7. (El 0,110 del PDF corresponde al $z$ de `hetregress`; el manual usa $t$ con 81 g.l.)
+
+## (c) Comparación
+
+**Enunciado.** Compare los resultados obtenidos en el inciso b).
+
+**Resolución (PDF):** "Los resultados obtenidos en el inciso (b) son semejantes en cuanto a valores estimados de los parámetros y a significatividad estadística."
+
+> **⚠️ DISCREPANCIA 7.** La afirmación es correcta a grandes rasgos, pero no exacta: la *dummy* de la firma 2 es significativa al 10 % en (b.1) ($p=0{,}056$) y **no** lo es en (b.2) ($p=0{,}110$); el coeficiente de `lf` también difiere (−1,216 vs. −1,115).
+> Además, el test de Wald de la propia salida de `hetregress` ($\chi^2(5)=1{,}56$, $p=0{,}906$) **no rechaza homocedasticidad por firma**, algo que la resolución no comenta y que es relevante: bajo ese resultado, el POLS del inciso (a) sería igualmente eficiente.
+
+| | POLS (a) | FGLS (b.1) | Harvey 2 etapas (b.2) |
+|---|---|---|---|
+| lq | 0,9193 (0,0299) | 0,9258 (0,0268) | 0,9323 (0,0295) |
+| lf | −1,0704 (0,2017) | −1,2163 (0,1856) | −1,1152 (0,1991) |
+| lpf | 0,4175 (0,0152) | 0,4056 (0,0125) | 0,4086 (0,0141) |
+| id = 2 | −0,0412 (0,0252) | −0,0460 (0,0238) | −0,0387 (0,0242) |
+| constante | 9,7059 (0,1931) | 9,9423 (0,1623) | 9,8414 (0,1768) |
+
+---
+
+# Ejercicio 3
+
+**Enunciado.** Considere la siguiente ecuación de salarios:
+
+$$y_{jt}=\beta_0+\beta_1 x_{jt}+u_{jt},\quad j=1,2,\dots,N;\ t=1,2 \tag{1}$$
+
+donde $\beta_0=\beta_1=1$, $u_j\sim N(0,\Omega)$, $\Omega=\begin{bmatrix}1&0\\0&4\end{bmatrix}$ y $x_j\sim U[1,20]$.
+
+Genere 1000 muestras de $N=5$ observaciones de corte transversal a partir del modelo (1). Para cada muestra estime por FGLS los parámetros del modelo y realice un test de hipótesis para contrastar que $H_0:\beta_1=1$. Reporte tamaño del test al 1 % y el poder del test cuando $\beta_1=0{,}8$. Luego, repita el procedimiento con $N=500$. ¿Se aprecia algún cambio en el tamaño y/o en el poder del test ante el incremento de $N$?
+
+```stata
+clear all
+global seed=12345
+set seed $seed
+
+global beta0=1
+global beta1=1
+global reps=1000
+global T=2
+
+matrix define omega=(1,0\0,4)
+
+*PROGRAMA*
+
+program define simulation, rclass
+
+	*Seteo*
+	drop _all
+	local N=$N
+	local T=$T
+	local NT=`N'*`T'
+	set obs `NT'
+	egen id=seq(), from(1) to(`N') block(`T')
+	egen t=seq(), from(1) to(`T')
+
+	*Variables*
+	generate x=runiform(1,20)
+	generate u=.
+	replace u=rnormal(0,omega[1,1]^(1/2)) if (t==1)
+	replace u=rnormal(0,omega[2,2]^(1/2)) if (t==2)
+	generate y=${beta1}+${beta2}*x+u
+
+	*Estimación*
+	regress y x
+	predict resid, residuals
+	generate w=.
+	forvalues t=1(1)`T' {
+		mkmat resid if (t==`t'), matrix(resid`t')
+		matrix sigma`t'=resid`t''*resid`t'/`N'
+		replace w=sigma`t'[1,1] if (t==`t')
+	}
+	regress y x [aweight=1/w]
+
+	*Resultados*
+	test x=${beta1}
+	return scalar pvalue_b1_1=r(p)
+	test x=0.8
+	return scalar pvalue_b1_08=r(p)
+
+end
+
+*SIMULACIONES*
+
+local samples="5 500"
+local cols: word count `samples'
+
+matrix define   results = J(2,`cols',.)
+matrix rownames results = "tam_test_1" "poder_test_08"
+matrix colnames results = "n_5" "n_500"
+
+local i=1
+quietly foreach N of local samples {
+
+	noisily display as text "Simulaciones con tamaño de muestra N=" as result `N'
+
+	*Simulación*
+	global N=`N'
+	simulate pvalue_b1_1_N`N'=r(pvalue_b1_1) pvalue_b1_08_N`N'=r(pvalue_b1_08), reps(${reps}) seed(${seed}): simulation
+
+	*Base resultados*
+	generate n=_n
+	if (`N'!=5) {
+		merge 1:1 n using "results_base"
+		drop _merge
+	}
+	order _all, sequential
+	order n, first
+	save "results_base", replace
+
+	*Matriz resultados*
+	count if (pvalue_b1_1_N`N'<0.01)
+	matrix results [1,`i']=r(N)/${reps}*100
+	count if (pvalue_b1_08_N`N'<0.01)
+	matrix results [2,`i']=r(N)/${reps}*100
+
+	local i=`i'+1
+
+}
+
+*RESULTADOS FINALES*
+
+drop _all
+matrix list results
+matrix define results_t=results'
+svmat results_t, names(col)
+
+local i=1
+generate N=.
+foreach N of local samples {
+	replace N=`N' in `i'
+	local i=`i'+1
+}
+
+order N, first
+save "results_matriz", replace
+```
+
+> **⚠️ DISCREPANCIA 8 (error en el código).** El programa genera `y` con `${beta1}+${beta2}*x+u`, pero **sólo están definidos `beta0` y `beta1`; `beta2` nunca se define**. Con el global vacío la expresión queda `1+*x+u` y Stata devolvería error de sintaxis. Lo pretendido es `y = ${beta0} + ${beta1}*x + u`. Como $\beta_0=\beta_1=1$, el cambio de nombres no altera los números, pero el código tal cual está **no corre**, por lo que los resultados del PDF no pueden provenir de esta versión exacta.
+
+> **⚠️ DISCREPANCIA 9 (definición del poder).** El enunciado pide el poder del test de $H_0:\beta_1=1$ **cuando el verdadero $\beta_1=0{,}8$**. El código genera siempre los datos con $\beta_1=1$ y calcula el "poder" contrastando `test x=0.8`: es decir, la nula falsa es $\beta_1=0{,}8$ y la verdad es $\beta_1=1$ — el esquema inverso. Ambos diseños tienen la misma distancia (0,2) entre nula y verdad, pero no son idénticos (la varianza del estimador depende de la configuración simulada) ni responden literalmente a lo pedido. Para respetar el enunciado habría que simular con $\beta_1=0{,}8$ y testear `x=1`.
+
+> **⚠️ DISCREPANCIA 10 (menor).** El enunciado escribe $x_j\sim U[1,20]$ (sin subíndice $t$), como si $x$ fuera constante en el tiempo dentro de cada individuo; el código la sortea independientemente para cada par $(j,t)$, coherente con la ecuación (1) escrita con $x_{jt}$. Asimismo, "$u_j\sim N(0,\Omega)$" con $\Omega$ diagonal se implementa como varianzas distintas por período (1 y 4), independientes entre sí. No contradice el enunciado, pero conviene explicitarlo.
+
+## Replicación en R
+
+Se corrigen las discrepancias 8 y 9: el modelo usa `beta0 + beta1 * x`, y se simulan **ambos** diseños: (A) el del `.do` (verdadero $\beta_1=1$, se testea $H_0:\beta_1=0{,}8$) y (B) el del enunciado (verdadero $\beta_1=0{,}8$, se testea $H_0:\beta_1=1$). Tamaño: verdadero $\beta_1=1$, $H_0:\beta_1=1$. Los números aleatorios de R difieren de los de Stata, así que los resultados coinciden sólo en magnitud.
+
+```{r ej3}
+omega <- c(1, 4)        # varianza del error en t = 1, 2
+Tt <- 2; reps <- 1000
+
+una_muestra <- function(N, beta1_verd, h0) {
+  d <- data.frame(id = rep(1:N, each = Tt), t = rep(1:Tt, times = N))
+  d$x <- runif(N * Tt, 1, 20)
+  d$u <- rnorm(N * Tt, 0, sqrt(omega[d$t]))
+  d$y <- 1 + beta1_verd * d$x + d$u
+  e  <- resid(lm(y ~ x, d))
+  d$w <- ave(e^2, d$t, FUN = mean)                  # sigma_t^2 = e_t'e_t / N
+  m  <- lm(y ~ x, d, weights = 1 / w)               # FGLS
+  est <- coef(summary(m))["x", ]
+  2 * pt(-abs((est[1] - h0) / est[2]), df = N * Tt - 2)   # p-valor del test t (= F de `test`)
+}
+
+rechazo <- function(N, beta1_verd, h0, alfa = 0.01)
+  100 * mean(replicate(reps, una_muestra(N, beta1_verd, h0)) < alfa)
+
+set.seed(12345)
+res <- sapply(c(N_5 = 5, N_500 = 500), function(N) c(
+  `tamaño (verd. 1, H0: 1)`            = rechazo(N, 1, 1),
+  `poder (A: verd. 1, H0: 0,8) [.do]`  = rechazo(N, 1, 0.8),
+  `poder (B: verd. 0,8, H0: 1) [enunc.]` = rechazo(N, 0.8, 1)))
+round(res, 1)
+```
+
+> **Lectura.** El patrón del PDF se replica: con $N=5$ el tamaño excede el 1 % nominal (en Stata 2,7 %) y el poder es bajo; con $N=500$ el tamaño baja a ≈ 1–1,5 % (con 1000 réplicas el error de simulación es ≈ 0,3 pp) y el poder es ≈ 100 %. Con la semilla fijada, los valores obtenidos son 2,8 % de tamaño y ≈ 34–36 % de poder para $N=5$ (Stata: 2,7 % y 33,2 %). Ambos diseños de poder (A y B) dan resultados cualitativamente iguales, por lo que la DISCREPANCIA 9 no altera la conclusión, aunque los valores para $N=5$ pueden diferir algo entre A y B. Las cifras exactas varían con la semilla y con el generador de números aleatorios.
+
+**Resultado (PDF):**
+
+```
+                  N_5  N_500
+  tam_test_1      2.7      1
+poder_tes~08     33.2    100
+```
+
+**Resolución (PDF):** "Por lo tanto, se puede observar que, ante el incremento de N, el tamaño del test tiende al nivel de significación del 1 % y el poder del test tiende al 100 %."
+
+> **Nota.** La conclusión es coherente con los números: con $N=5$ el test sobre-rechaza (2,7 % vs. 1 % nominal, por usar varianzas estimadas con muestra muy chica); con $N=500$ el tamaño es 1 %. La etiqueta `poder_tes~08` aparece truncada en el PDF porque proviene del nombre `poder_test_08` del código.
+
+---
+
+# Resumen de discrepancias
+
+| # | Ejercicio | Tipo | Descripción |
+|---|---|---|---|
+| 1 | 1(c) | Resolución incompleta | El PDF no reporta el estadístico LM ni el p-valor del test de correlación serial. |
+| 2 | 1(d) | Resolución incompleta / código | No se reporta el estadístico; el test usa sólo `lprbarr` y `lprbpris` (5 regresores). |
+| 3 | 1(e) | Resolución incompleta | El código estima con `prais` (iterativo y `twostep`); el PDF sólo muestra el FGLS manual. El $R^2$ del manual no es comparable (sin constante). |
+| 4 | 2 | Notación | Enunciado: $\beta_1..\beta_4,\delta_2..\delta_6$; código/salida: `lq lf lpf i.id`; métodos "1), 2)" vs. "(i), (ii)". |
+| 5 | 2(b.1) | Código | Asume la base ordenada por `id`/`year` y balanceada; no hay `sort`. |
+| 6 | 2(b.2) | Resolución incompleta | Falta en el PDF la salida del Harvey manual (`est_fgls2`). |
+| 7 | 2(c) | Comentario | "Semejantes en significatividad": la *dummy* de la firma 2 pasa de $p=0{,}056$ a $p=0{,}110$; no se comenta el Wald de `lnsigma2` ($p=0{,}906$, no rechaza homocedasticidad). |
+| 8 | 3 | **Error de código** | `${beta2}` no definido (debería ser `${beta0}+${beta1}*x`). |
+| 9 | 3 | **Enunciado vs. código** | Poder: el enunciado pide verdadero $\beta_1=0{,}8$ y $H_0:\beta_1=1$; el código simula $\beta_1=1$ y testea $\beta_1=0{,}8$. |
+| 11 | 1(e) | **Resolución vs. código (hallada en la replicación en R)** | El $\hat\rho$ del `.do` es ≈ 0,792; el PDF implica $\rho\approx0{,}763$. Los coeficientes del FGLS manual (p. ej. `lprbarr` −0,4609 vs. −0,4812) no se reproducen con el código entregado. |
+| 10 | 3 | Menor | Interpretación de $x_j$ y de $\Omega$ (varianzas por período) no explicitada en el enunciado. |

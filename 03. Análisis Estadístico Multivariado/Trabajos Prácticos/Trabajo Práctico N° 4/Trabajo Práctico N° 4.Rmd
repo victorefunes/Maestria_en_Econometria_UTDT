@@ -1,0 +1,344 @@
+---
+title: "Trabajo Práctico N° 4"
+subtitle: "Maestría en Econometría UTDT - Análisis Estadístico Multivariado"
+author: "Juan Menduiña"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: false
+    self_contained: true
+    df_print: paged
+lang: es
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.align = "center", fig.width = 8, fig.height = 5)
+options(digits = 7, OutDec = ".")
+
+if (!requireNamespace("haven", quietly = TRUE)) install.packages("haven")
+library(haven)
+
+# Carpeta con las bases (ine.dta, ejercicio_2.dta, ejercicio_3.dta).
+# Se asume que este Rmd está en la carpeta "Trabajo Práctico N° 4".
+datos <- "Datos"
+
+# Formato con coma decimal, como en el informe
+fmt <- function(x, d = 4) format(x, digits = d, decimal.mark = ",")
+tabla <- function(x, d = 4, ...) knitr::kable(x, digits = d, format.args = list(decimal.mark = ","), ...)
+
+#-------------------------------------------------------------------------------
+# Tests multivariados (equivalentes a los comandos "mvtest" de Stata)
+#-------------------------------------------------------------------------------
+
+# Decisión según el menor nivel de significatividad al que se rechaza H0
+decision <- function(p) {
+  ifelse(p < 0.01, "Rechaza H0 al 1%",
+  ifelse(p < 0.05, "Rechaza H0 al 5%",
+  ifelse(p < 0.10, "Rechaza H0 al 10%", "No rechaza H0 (10%)")))
+}
+
+fila <- function(prueba, valor, est, dist, p) {
+  data.frame(Prueba = prueba, Valor = valor, `Estadístico` = est, `Distribución` = dist,
+             `Valor p` = p, `Decisión` = decision(p), check.names = FALSE)
+}
+
+# mvtest normality, stats(all): Mardia (asimetría y curtosis), Henze-Zirkler y Doornik-Hansen
+mv_normalidad <- function(X) {
+  X <- as.matrix(X); n <- nrow(X); p <- ncol(X)
+  Xc <- sweep(X, 2, colMeans(X))
+  Sml <- crossprod(Xc) / n                       # matriz de covarianzas de máxima verosimilitud
+  M <- Xc %*% solve(Sml) %*% t(Xc)               # productos cruzados de Mahalanobis
+
+  # Mardia: asimetría y curtosis multivariadas
+  b1 <- sum(M^3) / n^2
+  b2 <- sum(diag(M)^2) / n
+  kappa <- (p + 1) * (n + 1) * (n + 3) / (n * ((n + 1) * (p + 1) - 6))   # corrección de muestra pequeña
+  chi_sk <- n * kappa * b1 / 6; df_sk <- p * (p + 1) * (p + 2) / 6
+  chi_ku <- ((b2 - p * (p + 2)) / sqrt(8 * p * (p + 2) / n))^2
+
+  # Henze-Zirkler (Stata informa n * HZ y el chi2 de la aproximación log-normal)
+  beta <- (1 / sqrt(2)) * ((2 * p + 1) * n / 4)^(1 / (p + 4))
+  Dj <- diag(M); Djk <- outer(Dj, Dj, "+") - 2 * M
+  HZ <- n * (sum(exp(-beta^2 / 2 * Djk)) / n^2 -
+             2 * (1 + beta^2)^(-p / 2) * mean(exp(-beta^2 / (2 * (1 + beta^2)) * Dj)) +
+             (1 + 2 * beta^2)^(-p / 2))
+  a <- 1 + 2 * beta^2; w <- (1 + beta^2) * (1 + 3 * beta^2)
+  mu <- 1 - a^(-p / 2) * (1 + p * beta^2 / a + p * (p + 2) * beta^4 / (2 * a^2))
+  s2 <- 2 * (1 + 4 * beta^2)^(-p / 2) +
+    2 * a^(-p) * (1 + 2 * p * beta^4 / a^2 + 3 * p * (p + 2) * beta^8 / (4 * a^4)) -
+    4 * w^(-p / 2) * (1 + 3 * p * beta^4 / (2 * w) + p * (p + 2) * beta^8 / (2 * w^2))
+  lm <- log(sqrt(mu^4 / (s2 + mu^2))); lv <- log((s2 + mu^2) / mu^2)
+  chi_hz <- ((log(HZ) - lm) / sqrt(lv))^2
+
+  # Doornik-Hansen (ómnibus sobre componentes ortogonalizados)
+  Z <- Xc %*% diag(1 / sqrt(diag(Sml)), p)
+  e <- eigen(crossprod(Z) / n, symmetric = TRUE)
+  Y <- Z %*% e$vectors %*% diag(1 / sqrt(e$values), p) %*% t(e$vectors)
+  sk <- apply(Y, 2, function(y) mean(y^3) / mean(y^2)^1.5)
+  ku <- apply(Y, 2, function(y) mean(y^4) / mean(y^2)^2)
+  bs <- 3 * (n^2 + 27 * n - 70) * (n + 1) * (n + 3) / ((n - 2) * (n + 5) * (n + 7) * (n + 9))
+  W2 <- -1 + sqrt(2 * (bs - 1)); dl <- 1 / sqrt(log(sqrt(W2)))
+  yv <- sk * sqrt((W2 - 1) * (n + 1) * (n + 3) / (12 * (n - 2)))
+  z1 <- dl * log(yv + sqrt(yv^2 + 1))
+  d <- (n - 3) * (n + 1) * (n^2 + 15 * n - 4)
+  aa <- (n - 2) * (n + 5) * (n + 7) * (n^2 + 27 * n - 70) / (6 * d)
+  cc <- (n - 7) * (n + 5) * (n + 7) * (n^2 + 2 * n - 5) / (6 * d)
+  kk <- (n + 5) * (n + 7) * (n^3 + 37 * n^2 + 11 * n - 313) / (12 * d)
+  al <- aa + sk^2 * cc
+  chi <- (ku - 1 - sk^2) * 2 * kk
+  z2 <- (((chi / (2 * al))^(1 / 3)) - 1 + 1 / (9 * al)) * sqrt(9 * al)
+  DH <- sum(z1^2 + z2^2)
+
+  rbind(
+    fila("Mardia mSkewness", b1, chi_sk, paste0("chi2(", df_sk, ")"), pchisq(chi_sk, df_sk, lower.tail = FALSE)),
+    fila("Mardia mKurtosis", b2, chi_ku, "chi2(1)", pchisq(chi_ku, 1, lower.tail = FALSE)),
+    fila("Henze-Zirkler", HZ, chi_hz, "chi2(1)", pchisq(chi_hz, 1, lower.tail = FALSE)),
+    fila("Doornik-Hansen", NA_real_, DH, paste0("chi2(", 2 * p, ")"), pchisq(DH, 2 * p, lower.tail = FALSE))
+  )
+}
+
+# mvtest means, zero: T2 de Hotelling para H0: mu = 0
+mv_medias_cero <- function(X) {
+  X <- as.matrix(X); n <- nrow(X); p <- ncol(X); m <- colMeans(X)
+  T2 <- n * drop(t(m) %*% solve(cov(X)) %*% m)
+  Fv <- (n - p) / (p * (n - 1)) * T2
+  fila("Hotelling: todas las medias = 0", T2, Fv, paste0("F(", p, ",", n - p, ")"),
+       pf(Fv, p, n - p, lower.tail = FALSE))
+}
+
+# mvtest means, equal: T2 de Hotelling para H0: mu_1 = ... = mu_p
+mv_medias_iguales <- function(X) {
+  X <- as.matrix(X); n <- nrow(X); p <- ncol(X); m <- colMeans(X)
+  C <- cbind(diag(p - 1), 0) - cbind(0, diag(p - 1))      # matriz de contrastes
+  cm <- C %*% m
+  T2 <- n * drop(t(cm) %*% solve(C %*% cov(X) %*% t(C)) %*% cm)
+  Fv <- (n - p + 1) / ((p - 1) * (n - 1)) * T2
+  fila("Hotelling: todas las medias iguales", T2, Fv, paste0("F(", p - 1, ",", n - p + 1, ")"),
+       pf(Fv, p - 1, n - p + 1, lower.tail = FALSE))
+}
+
+# mvtest covariances, spherical: test de esfericidad (Mauchly, con ajuste de Bartlett)
+mv_esfericidad <- function(X) {
+  X <- as.matrix(X); n <- nrow(X); p <- ncol(X); S <- cov(X)
+  lw <- log(det(S)) - p * log(sum(diag(S)) / p)
+  ch <- -(n - 1 - (2 * p^2 + p + 2) / (6 * p)) * lw; df <- p * (p + 1) / 2 - 1
+  fila("Esfericidad (LR ajustado)", NA_real_, ch, paste0("chi2(", df, ")"),
+       pchisq(ch, df, lower.tail = FALSE))
+}
+
+# mvtest covariances, diagonal: test de diagonalidad (independencia entre las variables)
+mv_diagonalidad <- function(X) {
+  X <- as.matrix(X); n <- nrow(X); p <- ncol(X); R <- cor(X)
+  ch <- -(n - 1 - (2 * p + 5) / 6) * log(det(R)); df <- p * (p - 1) / 2
+  fila("Diagonalidad (LR ajustado)", NA_real_, ch, paste0("chi2(", df, ")"),
+       pchisq(ch, df, lower.tail = FALSE))
+}
+
+# Todos los contrastes sobre una matriz de datos
+mv_todos <- function(X, normalidad = TRUE) {
+  out <- rbind(if (normalidad) mv_normalidad(X),
+               mv_medias_cero(X), mv_medias_iguales(X), mv_esfericidad(X), mv_diagonalidad(X))
+  rownames(out) <- NULL
+  out
+}
+
+tabla_mv <- function(x) {
+  knitr::kable(x, digits = 4, format.args = list(decimal.mark = ","), na = "")
+}
+```
+
+# Ejercicio 1
+
+*Construir un test de normalidad multivariada y aplicarlo sobre los datos correspondientes al primer ejercicio de la práctica 2. ¿Se puede concluir que el vector de medias de los datos es distinto del vector nulo? Recordemos del Ejercicio 1 de la Práctica 2 que el archivo "ine.dta" es una base de datos que contiene los gastos promedio, en euros, de los hogares españoles, por grandes rubros y comunidad autónoma, correspondientes a los relevamientos de la encuesta de presupuestos familiares del año 2005 realizada por el Instituto Nacional de Estadísticas de España (INE).*
+
+```{r ej1-datos}
+ine <- as.data.frame(read_dta(file.path(datos, "ine.dta")))
+vars1 <- c("alybnh", "vestcal", "vivagelo", "mobymant", "salud", "transp",
+           "comu", "ocio", "educ", "esparc", "otros")
+X1 <- ine[vars1]
+dim(X1)
+```
+
+**Test de normalidad multivariada:**
+
+```{r ej1-norm}
+tabla_mv(mv_normalidad(X1))
+```
+
+Por lo tanto, con un nivel de significancia del 10% (excepto con el test Henze-Zirkler), estos datos no aportan evidencia suficiente para indicar que no tienen una distribución normal multivariada.
+
+**Test de que todas las medias son 0:**
+
+```{r ej1-medias}
+tabla_mv(mv_medias_cero(X1))
+```
+
+Por lo tanto, con un nivel de significancia del 1%, estos datos aportan evidencia suficiente para indicar que el vector de medias de los datos es distinto del vector nulo.
+
+
+# Ejercicio 2
+
+*Generar una muestra de 100 observaciones de una población normal multivariada teniendo en cuenta los siguientes vectores de parámetros:*
+
+$$\mu = (2,\ 0{,}45,\ 0{,}23,\ 0{,}54,\ 0{,}12,\ 0{,}63,\ 0{,}66,\ 0{,}32)', \qquad \sigma = (0{,}67,\ 0{,}89,\ 0{,}56,\ 0{,}9,\ 0{,}56,\ 0{,}34,\ 0{,}76,\ 0{,}13)'.$$
+
+La muestra del informe se generó en Stata (`drawnorm`, semilla 12345) y quedó guardada en "ejercicio_2.dta"; como el generador de números aleatorios de R es distinto, se utiliza esa misma base para reproducir los resultados. En R, una muestra equivalente (con otra realización) se generaría así:
+
+```{r ej2-generar, eval=FALSE}
+set.seed(12345)
+mu1 <- c(2, 0.45, 0.23, 0.54, 0.12, 0.63, 0.66, 0.32)
+sd1 <- c(0.67, 0.89, 0.56, 0.90, 0.56, 0.34, 0.76, 0.13)
+X <- sapply(1:8, function(j) rnorm(100, mu1[j], sd1[j]))   # variables independientes
+```
+
+```{r ej2-datos}
+vars <- paste0("x", 1:8)
+ej2 <- as.data.frame(read_dta(file.path(datos, "ejercicio_2.dta")))
+X2 <- ej2[vars]
+tabla(t(sapply(X2, function(x) c(Obs = length(x), Media = mean(x), `Desv. est.` = sd(x),
+                                 Mín = min(x), Máx = max(x)))), d = 4)
+```
+
+## (a) Efectuar un test para verificar la normalidad de la base de datos construida.
+
+```{r ej2-a}
+tabla_mv(mv_normalidad(X2))
+```
+
+Por lo tanto, con un nivel de significancia del 10% (excepto con el test de Mardia mSkewness), estos datos no aportan evidencia suficiente para indicar que no tienen una distribución normal multivariada.
+
+## (b) ¿Existe evidencia empírica suficiente que permita concluir que el vector de medias es, estadísticamente, distinto del vector nulo?
+
+```{r ej2-b}
+tabla_mv(mv_medias_cero(X2))
+```
+
+Por lo tanto, con un nivel de significancia del 1%, estos datos aportan evidencia suficiente para indicar que el vector de medias no es igual al vector nulo.
+
+## (c) Efectuar un test para contrastar la hipótesis acerca de la igualdad de las medias de las variables que componen la matriz de datos.
+
+```{r ej2-c}
+tabla_mv(mv_medias_iguales(X2))
+```
+
+Por lo tanto, con un nivel de significancia del 1%, estos datos aportan evidencia suficiente para indicar que las medias de las variables que componen la matriz de datos no son iguales.
+
+## (d) Contrastar la esfericidad de la distribución de los datos.
+
+```{r ej2-d}
+tabla_mv(mv_esfericidad(X2))
+```
+
+Por lo tanto, con un nivel de significancia del 1%, estos datos aportan evidencia suficiente para indicar que los datos no son esféricos.
+
+## (e) ¿Se verifica, estadísticamente, la diagonalidad de la matriz de varianzas y covarianzas en los datos?
+
+```{r ej2-e}
+tabla_mv(mv_diagonalidad(X2))
+```
+
+Por lo tanto, con un nivel de significancia del 10%, estos datos no aportan evidencia suficiente para indicar que la matriz de datos no es diagonal.
+
+
+# Ejercicio 3
+
+*Repetir el ejercicio anterior, considerando, en este caso, la siguiente estructura:*
+
+$$X = \begin{pmatrix} X_1 \\ X_2 \\ X_3 \end{pmatrix},\quad X_1 \sim \mathcal{N}(\mu_1, \Sigma_1),\ X_2 \sim \mathcal{N}(\mu_2, \Sigma_2),\ X_3 \sim \mathcal{N}(\mu_3, \Sigma_3),$$
+
+*siendo $\mu_1$ y $\sigma_1$ los vectores del ejercicio anterior, $\pi_1 = 40\%$; $\mu_2 = \mu_1 + 1$, $\sigma_2 = \sigma_1 + 1$, $\pi_2 = 50\%$; y $\mu_3 = \mu_1 + 2$, $\sigma_3 = \sigma_1 + 2$, $\pi_3 = 10\%$ (con matrices de covarianzas diagonales).*
+
+```{r ej3-datos}
+ej3 <- as.data.frame(read_dta(file.path(datos, "ejercicio_3.dta")))
+X3 <- ej3[vars]
+table(`Partición` = ej3$id)
+```
+
+## (a) Comentar lo observado en contraste con el ejercicio anterior.
+
+```{r ej3-a}
+tabla_mv(mv_todos(X3))
+```
+
+Por lo tanto, con un nivel de significancia del 1%, estos datos aportan evidencia suficiente para indicar que no tienen una distribución normal multivariada. Además, con un nivel de significancia del 1%, estos datos aportan evidencia suficiente para indicar que el vector de medias es, estadísticamente, distinto del vector nulo, que las medias de las variables que componen la matriz de datos no son iguales, que los datos no son esféricos y que la matriz de datos no es diagonal.
+
+A diferencia del ejercicio anterior, al mezclar tres poblaciones con distintas medias y desvíos, se rechaza la normalidad multivariada con todos los tests y, además, se rechaza la diagonalidad (en el Ejercicio 2 no se rechazaba), ya que la mezcla induce correlaciones entre las variables.
+
+## (b) Efectuar similares contrastes, pero considerando cada partición de X por separado.
+
+```{r ej3-b, results='asis'}
+for (i in 1:3) {
+  cat("\n\n### Partición ", i, " (n = ", sum(ej3$id == i), ")\n\n", sep = "")
+  print(tabla_mv(mv_todos(ej3[ej3$id == i, vars])))
+}
+```
+
+**Partición 1.** Con un nivel de significancia del 10% (excepto con el test de Mardia mSkewness), estos datos no aportan evidencia suficiente para indicar que no tienen una distribución normal multivariada. Con un nivel del 1%, hay evidencia de que el vector de medias es distinto del nulo, de que las medias no son iguales y de que los datos no son esféricos; con un nivel del 10%, no hay evidencia de que la matriz no sea diagonal.
+
+**Partición 2.** Con un nivel de significancia del 10%, estos datos no aportan evidencia suficiente para indicar que no tienen una distribución normal multivariada. Con un nivel del 1%, hay evidencia de que el vector de medias es distinto del nulo, de que las medias no son iguales y de que los datos no son esféricos; con un nivel del 10%, no hay evidencia de que la matriz no sea diagonal.
+
+**Partición 3.** Con un nivel de significancia del 5%, hay evidencia de que el vector de medias es distinto del nulo y de que los datos no son esféricos.
+
+> *Nota: el PDF no comenta los resultados de normalidad de la partición 3. En la tabla, el test de Doornik-Hansen rechaza la normalidad al 5% (valor p = 0,0341) y el de Mardia mKurtosis, al 10% (0,0668); los otros dos tests no la rechazan. Con solo 10 observaciones y 8 variables estos resultados son poco confiables.*
+
+```{r ej3-b-p3}
+p3 <- mv_todos(ej3[ej3$id == 3, vars], normalidad = FALSE)
+```
+
+> **⚠ Anotación (el texto del informe no coincide con el resultado calculado):** en la partición 3, el test de igualdad de medias da F(7,3) = `r fmt(p3[2, "Estadístico"], 3)` con un valor p de `r fmt(p3[2, "Valor p"], 4)`, que **no es significativo** a ningún nivel usual; el informe dice que "con un nivel de significancia del 1%, estos datos aportan evidencia suficiente para indicar que las medias de las variables [...] no son iguales", lo cual contradice el valor p. La conclusión correcta es que estos datos (solo 10 observaciones) no aportan evidencia suficiente para rechazar la igualdad de medias.
+>
+> **⚠ Anotación (el texto del informe no coincide con el resultado calculado):** en la partición 3, el test de diagonalidad da un valor p de `r fmt(p3[4, "Valor p"], 4)`, menor que 0,10. Como la hipótesis nula es que la matriz **es** diagonal, con un nivel del 10% se rechaza la diagonalidad: los datos aportan evidencia suficiente para indicar que la matriz **no** es diagonal. El informe dice lo contrario ("estos datos aportan evidencia suficiente para indicar que la matriz de datos es diagonal"), lo que no es una conclusión que pueda extraerse de un test cuya hipótesis nula es la diagonalidad. Con n = 10 y p = 8, estos tests tienen muy poca potencia, por lo que conviene tomar el resultado con cautela.
+
+## (c) Proponer soluciones al problema observado, incluso considerando la eventualidad de que existan valores atípicos en la muestra que conlleven al mismo. Aplicar la/s soluciones sugeridas y comentar, brevemente, el resultado encontrado.
+
+El problema es que los datos provienen de una mezcla de tres poblaciones normales (con valores atípicos respecto de la población principal), por lo que la muestra conjunta no es normal. Se proponen dos opciones.
+
+### Opción 1: transformación logarítmica
+
+Se aplica el logaritmo a cada variable. Los valores no positivos generan valores faltantes y las observaciones correspondientes se descartan (como hace Stata en los tests).
+
+```{r ej3-c1}
+logs <- log(X3)
+n_validas <- sum(complete.cases(logs))
+logs <- logs[complete.cases(logs), ]
+n_validas
+tabla_mv(mv_todos(logs))
+```
+
+Con un nivel de significancia del 10% (excepto con el test Mardia mKurtosis), estos datos no aportan evidencia suficiente para indicar que no tienen una distribución normal multivariada.
+
+> *Nota: la transformación reduce la muestra a `r n_validas` observaciones (las que tienen todas las variables positivas), lo que limita la potencia de los tests y sesga la muestra hacia las poblaciones con medias más altas; el informe no lo menciona.*
+
+### Opción 2: generar una única muestra normal con la media y la covarianza agregadas
+
+Se calculan el vector de medias agregado y la matriz de covarianzas de la mezcla (varianza entre grupos más varianza dentro de los grupos, ponderadas por $\pi$), y se genera una muestra normal multivariada de 100 observaciones con esos parámetros.
+
+```{r ej3-c2}
+mu1 <- c(2, 0.45, 0.23, 0.54, 0.12, 0.63, 0.66, 0.32)
+medias <- cbind(mu1, mu1 + 1, mu1 + 2)                  # 8 x 3
+pesos <- c(0.4, 0.5, 0.1)
+media_agregada <- drop(medias %*% pesos)
+
+var_b <- matrix(0, 8, 8); var_w <- matrix(0, 8, 8)
+for (i in 1:3) {
+  Xi <- as.matrix(ej3[ej3$id == i, vars])
+  dif <- medias[, i] - media_agregada
+  var_b <- var_b + pesos[i] * (dif %*% t(dif))           # varianza entre grupos
+  var_w <- var_w + pesos[i] * cov(Xi)                    # varianza dentro de los grupos
+}
+matriz_cov <- var_b + var_w
+tabla(cbind(`Media agregada` = media_agregada, matriz_cov), d = 3)
+```
+
+```{r ej3-c2-sim}
+set.seed(12345)
+X_sim <- as.data.frame(MASS::mvrnorm(100, mu = media_agregada, Sigma = matriz_cov))
+names(X_sim) <- vars
+tabla_mv(mv_todos(X_sim))
+```
+
+Con un nivel de significancia del 10%, estos datos no aportan evidencia suficiente para indicar que no tienen una distribución normal multivariada; el vector de medias es distinto del nulo y las medias de las variables no son iguales (nivel del 1%), y los datos no son esféricos ni diagonales (nivel del 1%).
+
+> **⚠ Anotación (diferencia con el informe):** esta opción depende de una muestra aleatoria; el generador de números aleatorios de R no reproduce el de Stata (semilla 12345), por lo que los estadísticos exactos de esta tabla no coinciden con los del PDF (por ejemplo, T² de Hotelling de 311,47 y esfericidad de 215,27 en el informe). Lo que se mantiene es la matriz de parámetros (media y covarianza agregadas, calculadas a partir de las muestras guardadas) y la conclusión cualitativa: no se rechaza la normalidad pero sí la nulidad y la igualdad de medias, la esfericidad y la diagonalidad. Conviene tener en cuenta que esta opción *genera nuevos datos normales* a partir de los parámetros estimados, de modo que que no se rechace la normalidad es esperable por construcción y no prueba que los datos originales lo sean.

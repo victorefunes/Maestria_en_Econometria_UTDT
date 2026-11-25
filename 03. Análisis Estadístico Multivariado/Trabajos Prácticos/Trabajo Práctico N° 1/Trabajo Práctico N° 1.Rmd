@@ -1,0 +1,461 @@
+---
+title: "Trabajo Práctico N° 1"
+subtitle: "Maestría en Econometría UTDT - Análisis Estadístico Multivariado"
+author: "Juan Menduiña"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: false
+    self_contained: true
+    df_print: paged
+lang: es
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.align = "center", fig.width = 8, fig.height = 5.5)
+options(digits = 7, OutDec = ".")
+
+if (!requireNamespace("haven", quietly = TRUE)) install.packages("haven")
+library(haven)
+
+# Carpeta con las bases (eurosec.dta, Individual_t410.dta, records.dta).
+# Se asume que este Rmd está en la carpeta "Trabajo Práctico N° 1".
+datos <- "Datos"
+
+# Formato con coma decimal, como en el informe
+fmt <- function(x, d = 8) format(x, digits = d, decimal.mark = ",", scientific = FALSE)
+fmtc <- function(x, d = 4) format(x, digits = d, decimal.mark = ",")
+tabla <- function(x, d = 4, ...) knitr::kable(x, digits = d, format.args = list(decimal.mark = ","), ...)
+
+#-------------------------------------------------------------------------------
+# Funciones auxiliares
+#-------------------------------------------------------------------------------
+
+# Media, varianza y coeficiente de variación de cada columna (tabstat)
+tabstat_mvc <- function(df) {
+  t(sapply(df, function(x) c(Media = mean(x), Varianza = var(x), CV = sd(x) / mean(x))))
+}
+
+# Medidas globales de variabilidad a partir de la matriz de covarianzas
+variabilidad_global <- function(S) {
+  p <- ncol(S)
+  c(varianza_total = sum(diag(S)),
+    varianza_media = sum(diag(S)) / p,
+    varianza_generalizada = det(S),
+    varianza_efectiva = det(S)^(1 / p))
+}
+
+# Correlaciones parciales a partir de la matriz de precisión
+corr_parcial_matriz <- function(S) {
+  P <- solve(S)
+  R <- -P / sqrt(outer(diag(P), diag(P)))
+  diag(R) <- 1
+  dimnames(R) <- dimnames(S)
+  R
+}
+
+# pcorr: correlación parcial y semiparcial de la 1ra variable con cada una de las restantes
+pcorr <- function(df) {
+  S <- cov(df)
+  y <- 1
+  xs <- 2:ncol(df)
+  Rp <- corr_parcial_matriz(S)
+  Pxx <- solve(S[xs, xs, drop = FALSE])
+  beta <- solve(S[xs, xs, drop = FALSE], S[xs, y])
+  semi <- beta * sqrt(1 / diag(Pxx)) / sqrt(S[y, y])
+  pval <- summary(lm(df[[1]] ~ ., data = df[xs]))$coefficients[-1, 4]
+  out <- data.frame(Parcial = Rp[y, xs], Semiparcial = semi,
+                    Parcial2 = Rp[y, xs]^2, Semiparcial2 = semi^2,
+                    p_valor = unname(pval))
+  names(out) <- c("Corr. parcial", "Corr. semiparcial", "Corr. parcial^2",
+                  "Corr. semiparcial^2", "Valor p")
+  rownames(out) <- colnames(df)[xs]
+  out
+}
+
+# Coeficiente de dependencia efectiva
+dependencia_efectiva <- function(C) 1 - det(C)^(1 / (ncol(C) - 1))
+
+# Tabla de autovalores estilo "pca" de Stata
+tabla_pca <- function(ev) {
+  data.frame(Autovalor = ev,
+             Diferencia = c(-diff(ev), NA),
+             Proporción = ev / sum(ev),
+             Acumulada = cumsum(ev / sum(ev)),
+             row.names = paste0("Comp", seq_along(ev)))
+}
+```
+
+# Ejercicio 1
+
+*El archivo "eurosec.dta" es una base de datos que contiene los porcentajes de empleo de los distintos sectores económicos para un grupo de países europeos. Los sectores son: S1 (Agricultura), S2 (Minería), S3 (Industria), S4 (Energía), S5 (Construcción), S6 (Servicios Industriales), S7 (Finanzas), S8 (Servicios), S9 (Transporte y Telecomunicaciones).*
+
+```{r ej1-datos}
+eurosec <- as.data.frame(read_dta(file.path(datos, "eurosec.dta")))
+vars1 <- paste0("s", 1:9)
+X1 <- eurosec[vars1]
+str(eurosec)
+```
+
+## (a) Obtener la media, varianza y el coeficiente de variación asociados a cada una de las variables.
+
+```{r ej1-a}
+tabla(t(tabstat_mvc(X1)), d = 5)
+```
+
+## (b) Obtener la matriz de varianzas y covarianzas.
+
+```{r ej1-b}
+S1 <- cov(X1)
+tabla(S1, d = 4)
+```
+
+## (c) Obtener las medidas globales de variabilidad.
+
+```{r ej1-c}
+vg1 <- variabilidad_global(S1)
+```
+
+- Varianza total = `r fmt(vg1["varianza_total"])`.
+- Varianza media = `r fmt(vg1["varianza_media"])`.
+- Varianza generalizada = `r fmt(vg1["varianza_generalizada"])`.
+- Varianza efectiva = `r fmt(vg1["varianza_efectiva"])`.
+
+## (d) Obtener la matriz de correlaciones.
+
+```{r ej1-d}
+C1 <- cor(X1)
+tabla(C1, d = 4)
+```
+
+## (e) Regresar el porcentaje de empleo en el sector Minería, respecto de las variables restantes. Obtener la varianza de los residuos y el coeficiente de determinación. ¿Es posible obtener las estimaciones a partir de la matriz de varianzas y covarianzas?
+
+```{r ej1-e}
+reg1 <- lm(s2 ~ s1 + s3 + s4 + s5 + s6 + s7 + s8 + s9, data = eurosec)
+summary(reg1)
+
+var_resid_reg1 <- var(residuals(reg1))
+r2_reg1 <- summary(reg1)$r.squared
+
+S1_inv <- solve(S1)
+var_resid_S1 <- 1 / S1_inv[2, 2]
+r2_S1 <- 1 - 1 / (S1[2, 2] * S1_inv[2, 2])
+
+tabla(data.frame(
+  Medida = c("Varianza de los residuos", "Coeficiente de determinación"),
+  Regresión = c(var_resid_reg1, r2_reg1),
+  `Matriz de precisión` = c(var_resid_S1, r2_S1),
+  check.names = FALSE
+), d = 8)
+```
+
+Varianza de los residuos = `r fmt(var_resid_reg1)`.
+Coeficiente de determinación = `r fmt(r2_reg1)`.
+
+Sí, es posible obtener las estimaciones a partir de la matriz de varianzas y covarianzas y la matriz de precisión: la varianza de los residuos es $1/s^{22}$ y el coeficiente de determinación es $1 - \frac{1}{s_{22}\,s^{22}}$, donde $s^{22}$ es el elemento de la diagonal de $S^{-1}$ correspondiente a la variable explicada.
+
+## (f) Obtener el coeficiente de correlación parcial entre los porcentajes de empleo en el sector agrícola respecto del sector minero. ¿Cómo efectuaría el cómputo a partir de la matriz de varianzas y covarianzas?
+
+```{r ej1-f}
+tabla(pcorr(X1), d = 4)
+
+resid_s1 <- residuals(lm(s1 ~ s3 + s4 + s5 + s6 + s7 + s8 + s9, data = eurosec))
+resid_s2 <- residuals(lm(s2 ~ s3 + s4 + s5 + s6 + s7 + s8 + s9, data = eurosec))
+cp_com1 <- cor(resid_s1, resid_s2)
+cp_S1 <- -S1_inv[1, 2] / sqrt(S1_inv[1, 1] * S1_inv[2, 2])
+```
+
+El coeficiente de correlación parcial entre los porcentajes de empleo en el sector agrícola respecto del sector minero es `r fmt(cp_com1)` (correlacionando los residuos de ambas regresiones sobre las demás variables).
+
+A partir de la matriz de varianzas y covarianzas, se calcula con su inversa (matriz de precisión):
+
+$$r_{12\cdot resto} = -\frac{s^{12}}{\sqrt{s^{11}\,s^{22}}} = `r fmt(cp_S1)`$$
+
+## (g) Obtener los autovalores asociados a la matriz de correlaciones. ¿Existe alguna relación entre el número de variables y los mismos?
+
+```{r ej1-g}
+aval1 <- eigen(C1, symmetric = TRUE)$values
+names(aval1) <- paste0("e", seq_along(aval1))
+tabla(t(aval1), d = 6)
+sum(aval1)
+```
+
+Sí, existe una relación entre el número de variables y los autovalores, siendo la suma de estos últimos igual al número de variables (`r length(aval1)`), ya que la traza de la matriz de correlaciones es igual a $p$.
+
+## (h) Obtener el coeficiente de dependencia efectiva.
+
+```{r ej1-h}
+cde1 <- dependencia_efectiva(C1)
+```
+
+Coeficiente de dependencia efectiva = `r fmt(cde1)`.
+
+## (i) Comentar, brevemente, la información que brinda la matriz de precisión.
+
+```{r ej1-i}
+tabla(S1_inv, d = 4)
+```
+
+La matriz de precisión brinda información sobre la relación multivariada entre cada una de las variables y el resto. Contiene información sobre:
+
+- por filas y por fuera de la diagonal principal, los coeficientes de regresión múltiple de la variable correspondiente a esa fila, explicada por todas las demás (a menos de un factor de escala: $\beta_{ij} = -s^{ij}/s^{ii}$);
+- en la diagonal, las inversas de las varianzas residuales de la regresión de cada variable con el resto;
+- estandarizando los elementos de esta matriz, los elementos fuera de la diagonal principal son los coeficientes de correlación parcial entre estas variables.
+
+Por lo tanto, $S^{-1}$ contiene toda la información sobre las regresiones de cada variable sobre las restantes.
+
+
+# Ejercicio 2
+
+*En el archivo "individual_t410.dta", se encontrará el corte por personas de la Encuesta Permanente de Hogares correspondiente al cuarto trimestre del año 2010. Se propone la construcción de una base para analizar la estructura de la muestra ocupada mayor de 15 años de edad, por aglomerado y por rama de actividad, de acuerdo con la clasificación CAES-Mercosur, considerando las grandes ramas: Agricultura, Ganadería, Caza y Pesca; Minería; Industria; Energía; Construcción; Comercio; Correo y Telecomunicaciones; Ss. Financieros; Otros Ss.; y Administración Pública.*
+
+Se restringe la muestra a los ocupados (`estado == 1`) mayores de 15 años (`ch06 > 15`) y se agrupan los dos primeros dígitos del código de actividad (`pp04b_cod`) en las 10 grandes ramas.
+
+```{r ej2-datos}
+indiv <- as.data.frame(read_dta(file.path(datos, "Individual_t410.dta")))
+indiv <- indiv[!is.na(indiv$estado) & indiv$estado == 1 &
+                 !is.na(indiv$ch06) & indiv$ch06 > 15, ]
+
+s <- suppressWarnings(as.numeric(substr(trimws(as.character(indiv$pp04b_cod)), 1, 2)))
+sector <- s   # los códigos no contemplados conservan su valor original
+sector[!is.na(s) & s >= 1  & s <= 5]  <- 1    # Agricultura, Ganadería, Caza y Pesca
+sector[!is.na(s) & s >= 10 & s <= 14] <- 2    # Minería
+sector[!is.na(s) & s >= 15 & s <= 37] <- 3    # Industria
+sector[!is.na(s) & s == 40]            <- 4    # Energía
+sector[!is.na(s) & s == 45]            <- 5    # Construcción
+sector[!is.na(s) & s >= 50 & s <= 53] <- 6    # Comercio
+sector[!is.na(s) & s == 64]            <- 7    # Correo y Telecomunicaciones
+sector[!is.na(s) & s >= 65 & s <= 67] <- 8    # Ss. Financieros
+sector[!is.na(s) & (s == 41 | s == 55 | (s >= 60 & s <= 63) |
+                      (s >= 70 & s <= 74) | s == 80 | s == 85 |
+                      (s >= 90 & s <= 99))] <- 9   # Otros Ss.
+sector[!is.na(s) & s == 75]            <- 10   # Administración Pública
+indiv$sector_empleo <- sector
+
+etiq_sector <- c("Agricultura, Ganadería, Caza y Pesca", "Minería", "Industria",
+                 "Energía", "Construcción", "Comercio", "Correo y Telecomunicaciones",
+                 "Ss. Financieros", "Otros Ss.", "Administración Pública")
+
+table(indiv$sector_empleo, useNA = "ifany")
+```
+
+Se construye la base con la proporción de ocupados (en %) de cada rama en cada aglomerado, respecto del total de ocupados de la muestra.
+
+```{r ej2-base}
+tabmat <- unclass(table(indiv$aglomerado, indiv$sector_empleo))
+X2m <- tabmat / nrow(indiv) * 100
+colnames(X2m) <- paste0("X", seq_len(ncol(X2m)))
+X2 <- as.data.frame(X2m)
+stopifnot(ncol(X2) == 10)   # se esperan exactamente las 10 ramas
+dim(X2)
+```
+
+## (a) Analizar la variabilidad de la proporción de ocupados por grandes ramas de actividad.
+
+```{r ej2-a}
+res2 <- as.data.frame(tabstat_mvc(X2))
+rownames(res2) <- etiq_sector
+names(res2) <- c("Media", "Varianza", "Coef. de variación")
+tabla(res2, d = 6)
+```
+
+## (b) Analizar la estructura de correlaciones entre las proporciones de ocupados de las ramas de actividad consideradas.
+
+```{r ej2-b}
+S2 <- cov(X2)
+vg2 <- variabilidad_global(S2)
+C2 <- cor(X2)
+tabla(C2, d = 3)
+```
+
+- Varianza total = `r fmt(vg2["varianza_total"])`.
+- Varianza media = `r fmt(vg2["varianza_media"])`.
+- Varianza generalizada = `r format(vg2["varianza_generalizada"], digits = 4, decimal.mark = ",")`.
+- Varianza efectiva = `r fmt(vg2["varianza_efectiva"])`.
+
+## (c) Regresar la proporción de ocupados de la rama servicios, respecto de las proporciones observadas en las ramas restantes. Obtener la varianza de los residuos y el coeficiente de determinación. ¿De qué otra forma se hubiera podido obtener estas estimaciones?
+
+```{r ej2-c}
+reg2 <- lm(X9 ~ X1 + X2 + X3 + X4 + X5 + X6 + X7 + X8 + X10, data = X2)
+summary(reg2)
+
+var_resid_reg2 <- var(residuals(reg2))
+r2_reg2 <- summary(reg2)$r.squared
+
+S2_inv <- solve(S2)
+var_resid_S2 <- 1 / S2_inv[9, 9]
+r2_S2 <- 1 - 1 / (S2[9, 9] * S2_inv[9, 9])
+
+tabla(data.frame(
+  Medida = c("Varianza de los residuos", "Coeficiente de determinación"),
+  Regresión = c(var_resid_reg2, r2_reg2),
+  `Matriz de precisión` = c(var_resid_S2, r2_S2),
+  check.names = FALSE
+), d = 8)
+```
+
+Varianza de los residuos = `r fmt(var_resid_reg2)`.
+Coeficiente de determinación = `r fmt(r2_reg2)`.
+
+Estas estimaciones se podrían haber obtenido mediante la matriz de varianzas y covarianzas y la matriz de precisión.
+
+## (d) Obtener el coeficiente de correlación parcial entre los porcentajes de ocupados en el sector comercial respecto del sector Otros Ss.
+
+```{r ej2-d}
+resid_s6 <- residuals(lm(X6 ~ X1 + X2 + X3 + X4 + X5 + X7 + X8 + X10, data = X2))
+resid_s9 <- residuals(lm(X9 ~ X1 + X2 + X3 + X4 + X5 + X7 + X8 + X10, data = X2))
+cp_com2 <- cor(resid_s6, resid_s9)
+cp_S2 <- -S2_inv[6, 9] / sqrt(S2_inv[6, 6] * S2_inv[9, 9])
+
+tabla(pcorr(X2[c("X9", "X1", "X2", "X3", "X4", "X5", "X6", "X7", "X8", "X10")]), d = 4)
+```
+
+El coeficiente de correlación parcial entre los porcentajes de ocupados en el sector Comercio respecto del sector Otros Ss. es `r fmt(cp_com2)` (por la matriz de precisión: `r fmt(cp_S2)`).
+
+## (e) Obtener los autovalores asociados a la matriz de correlaciones.
+
+```{r ej2-e}
+aval2 <- eigen(C2, symmetric = TRUE)$values
+names(aval2) <- paste0("e", seq_along(aval2))
+tabla(t(aval2), d = 6)
+```
+
+## (f) Proponer una métrica que resuma la dependencia entre las proporciones de ocupados entre los distintos sectores.
+
+```{r ej2-f}
+cde2 <- dependencia_efectiva(C2)
+```
+
+Se propone el coeficiente de dependencia efectiva, $1 - |R|^{1/(p-1)}$, que toma valores entre 0 (variables incorrelacionadas) y 1 (dependencia lineal perfecta).
+
+Coeficiente de dependencia efectiva = `r fmt(cde2)`.
+
+
+# Ejercicio 3
+
+*El archivo "records.dta" contiene información sobre récords obtenidos por atletas de diferentes nacionalidades en varias especialidades. Las variables son los tiempos en: `m_100` (100 metros), `m_200` (200 metros), `m_400` (400 metros), `m_800` (800 metros), `m_1500` (1500 metros), `km_5` (5 kilómetros), `km_10` (10 kilómetros) y `maraton` (42 kilómetros).*
+
+```{r ej3-datos}
+records <- as.data.frame(read_dta(file.path(datos, "records.dta")))
+vars3 <- c("m_100", "m_200", "m_400", "m_800", "m_1500", "km_5", "km_10", "maraton")
+X3 <- records[vars3]
+str(records)
+```
+
+## (a) Realizar un análisis descriptivo de los datos. Señalar si, en el caso de querer efectuar un análisis de componentes principales, se recomendaría la estandarización de las variables.
+
+```{r ej3-a}
+desc3 <- t(sapply(X3, function(x) c(Obs = sum(!is.na(x)), Media = mean(x),
+                                    `Desv. est.` = sd(x), Mín = min(x), Máx = max(x))))
+tabla(desc3, d = 4)
+tabla(t(tabstat_mvc(X3)), d = 5)
+```
+
+Matriz de correlaciones:
+
+```{r ej3-a-cor}
+tabla(cor(X3), d = 4)
+```
+
+Matriz de varianzas y covarianzas:
+
+```{r ej3-a-cov}
+tabla(cov(X3), d = 4)
+```
+
+Correlaciones parcial y semiparcial de `m_100` con las demás variables:
+
+```{r ej3-a-pcorr}
+tabla(pcorr(X3), d = 4)
+```
+
+En el caso de querer realizar un análisis de componentes principales, se recomendaría la estandarización de las variables, ya que, de lo contrario, se estarían considerando varianzas de unidades de medida diferentes (por ejemplo, la varianza del maratón es `r fmtc(var(X3$maraton))`, frente a `r fmtc(var(X3$m_100))` de los 100 metros).
+
+## (b) Realizar un análisis de componentes principales.
+
+Los autovectores se normalizan en signo (el signo de un componente es arbitrario) para que el primer componente tenga cargas positivas y, en el de correlaciones, el segundo tenga carga positiva en `m_100`.
+
+```{r ej3-b-fun}
+ajustar_signo <- function(V, comp2_ref = NULL) {
+  if (sum(V[, 1]) < 0) V[, 1] <- -V[, 1]
+  if (!is.null(comp2_ref) && V[comp2_ref, 2] < 0) V[, 2] <- -V[, 2]
+  dimnames(V) <- list(vars3, paste0("Comp", seq_len(ncol(V))))
+  V
+}
+```
+
+**Basado en matriz de correlaciones:**
+
+```{r ej3-b-cor}
+eig_cor <- eigen(cor(X3), symmetric = TRUE)
+ev_cor <- eig_cor$values
+V_cor <- ajustar_signo(eig_cor$vectors, comp2_ref = 1)
+tabla(tabla_pca(ev_cor), d = 4)
+tabla(V_cor, d = 4)
+```
+
+**Basado en matriz de varianzas y covarianzas:**
+
+```{r ej3-b-cov}
+eig_cov <- eigen(cov(X3), symmetric = TRUE)
+ev_cov <- eig_cov$values
+V_cov <- ajustar_signo(eig_cov$vectors)
+tabla(tabla_pca(ev_cov), d = 4)
+tabla(V_cov, d = 4)
+```
+
+Con la matriz de covarianzas, el primer componente explica `r fmtc(100 * ev_cov[1] / sum(ev_cov), 3)`% de la varianza total, debido a que está dominado por el maratón (la variable con mayor varianza, por estar medida en minutos). Con la matriz de correlaciones, el primer componente explica `r fmtc(100 * ev_cor[1] / sum(ev_cor), 3)`%.
+
+## (c) Efectuar la selección de los componentes principales de acuerdo con los siguientes modos:
+
+### (i) Búsqueda del "codo".
+
+```{r ej3-c-i}
+plot(seq_along(ev_cor), ev_cor, type = "b", pch = 19, col = "#1A476F",
+     main = "PCA\n(basado en matriz de correlaciones)",
+     xlab = "Componente", ylab = "Autovalor", ylim = c(0, 8))
+abline(h = 1, col = "red")
+```
+
+Mediante este modo, se seleccionarían los dos primeros componentes principales (el "codo" aparece en el segundo componente; además, es el último que se encuentra cerca del autovalor 1).
+
+### (ii) Graficando el porcentaje de varianza explicada por cada componente.
+
+```{r ej3-c-ii, fig.height = 4.5}
+prop <- ev_cor / sum(ev_cor)
+prop_acum <- cumsum(prop)
+
+graf_barras <- function(y, titulo) {
+  b <- barplot(y, names.arg = seq_along(y), ylim = c(0, 1.05), yaxt = "n", space = 0.4,
+               col = "#1A476F", xlab = "Componente",
+               main = paste0(titulo, "\n(basado en matriz de correlaciones)"))
+  axis(2, at = seq(0, 1, 0.1), labels = paste0(seq(0, 100, 10), "%"), las = 1)
+  text(b, y, labels = formatC(y, digits = 3, format = "g"), pos = 3, cex = 0.8)
+}
+graf_barras(prop, "Porcentaje de varianza explicada por cada componente")
+graf_barras(prop_acum, "Porcentaje acumulado de varianza explicada por cada componente")
+```
+
+Mediante este modo, se seleccionarían los dos primeros componentes principales (que explican, en conjunto, `r fmtc(100 * prop_acum[2], 3)`% de la varianza).
+
+## (d) Graficar las componentes en pares, en función de lo determinado en el inciso anterior. Interpretar.
+
+```{r ej3-d, fig.height = 6.5}
+scores <- scale(as.matrix(X3)) %*% V_cor[, 1:2]
+u_1 <- scores[, 1]
+u_2 <- scores[, 2]
+
+plot(u_1, u_2, pch = 19, col = "#1A476F", cex = 0.8,
+     main = "Scatterplot\n(basado en matriz de correlaciones)",
+     xlab = "Componente 1", ylab = "Componente 2")
+abline(h = 0, v = 0, col = "red")
+text(u_1, u_2, labels = records$pais, pos = 4, cex = 0.6, col = "#1A476F")
+```
+
+**Interpretación.** A partir de las cargas del análisis basado en correlaciones:
+
+- El **Componente 1** tiene cargas positivas y similares en todas las pruebas, por lo que funciona como un índice general de tiempo: valores altos corresponden a países con tiempos récord más lentos en todas las especialidades y valores bajos a países con mejores marcas generales. Es el componente que explica la mayor parte de la variabilidad (`r fmtc(100 * prop[1], 3)`%).
+- El **Componente 2** contrasta las pruebas de velocidad (100, 200 y 400 metros, con cargas positivas) con las de resistencia (10 km y maratón, con cargas negativas), es decir, distingue la especialización de cada país entre distancias cortas y largas.
+- En el gráfico, países como USA, Italia y la URSS se ubican a la izquierda (mejores marcas generales), mientras que Samoa y las Islas Cook (`Coo`) se ubican a la derecha (marcas más lentas), de manera que el primer componente los separa claramente del resto. Sobre el segundo componente, se separan países con mejor desempeño relativo en distancias largas (por ejemplo, Rep. Dom., Singapur, Tailandia y Malasia, abajo) de los que lo tienen en distancias cortas (por ejemplo, Costa, RD-Korea y Turquía, arriba).

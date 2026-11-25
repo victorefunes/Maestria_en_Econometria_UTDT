@@ -1,0 +1,586 @@
+---
+title: "Trabajo Práctico N° 2 — Matching"
+subtitle: "Microeconometría II · Maestría en Econometría UTDT"
+lang: es
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+---
+
+```{r setup, include=FALSE}
+# error = TRUE: si un chunk falla (por ejemplo, falta un paquete), el documento
+# igual se genera y muestra el error en ese lugar.
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, error = TRUE)
+```
+
+Este documento combina, para cada inciso: **(P)** el enunciado (`Trabajo Práctico N° 2 (P).pdf`), la **solución oficial** (`(S).pdf`, es el mismo enunciado con las soluciones del docente para los Ejercicios 1, 2 y 4), **(R)** la respuesta de `Trabajo Práctico N° 2 (R).pdf` y el **código en R** (`Datos/Trabajo Práctico N° 2.R`, convertido desde el `.do`).
+
+> ⚠️ **DISCREPANCIA** marca todo lo que no coincide entre enunciado, solución oficial, respuesta y código.
+> ✅ marca lo que verifiqué y está bien.
+> El código **no se ejecutó** (R no está disponible en esta máquina). Los resultados de Stata que cito vienen de (R).pdf y del log de Stata que pegaste en la conversación (la corrida del `.do` actual).
+> Las rutas de los chunks son relativas a la carpeta de este documento (`Datos/cattaneo2.dta`).
+
+---
+
+## Resumen de discrepancias
+
+| # | Dónde | Qué pasa | Gravedad |
+|---|-------|----------|----------|
+| 1 | Ej. 1 (a) | (R) da "15, 6,6 y 3,9" sin aclarar la comparación: son **cigars/pipes − cigarettes**. Contra **no fumadores** (lo natural) son **15,3 / 9,4 / 3,9**. | Media |
+| 2 | Ej. 1 (a) | (R) dice que independencia pide que "la media de la tasa de mortalidad entre grupos sea igual". La solución oficial dice que se igualan las medias de los **resultados potenciales** (Y¹ e Y⁰), no la mortalidad observada. | Alta (concepto) |
+| 3 | Ej. 1 (b) | (R) acierta en que no se cumple independencia, pero no cita la evidencia de la Tabla 5.2 (edades medias muy distintas entre grupos). | Baja |
+| 4 | Ej. 1 (c) | **Sin respuesta** en (R) ni en (S). Con los datos del enunciado (edades medias, no por tramos) no se puede calcular el efecto ajustado por edad. | Media |
+| 5 | Enunciado Ej. 1 | La Tabla 5.2 aparece **duplicada** en (P) y (S). | Baja |
+| 6 | Ej. 2 | La demostración de (R) **omite pasos**: no escribe la igualdad P(X=1\|e(W)) = e(W) (eq. 4), no justifica con LIE que se puede sacar e(W) del condicionamiento, y no incluye la nota 1 (relajar la condición de W a e(W)). | Media |
+| 7 | Ej. 3 (b), enunciado vs. `.do` | El enunciado pide la **diferencia de medias simple** del peso (`bweight`) entre fumadoras y no fumadoras. El `.do` **no la calcula**: sus incisos (a) y (b) son ambos balance de covariables. | Alta |
+| 8 | Ej. 3 (a)–(c), (R) | Solo dice "Stata." sin resultados. Abajo incluyo los del log pegado. | Media |
+| 9 | Ej. 3 (c), enunciado vs. `.do` | El enunciado pide un **Logit con las 7 variables** y un soporte común. El `.do` usa `psestimate` (agrega `prenatal×mmarried`, `monthslb²`, `fbaby×prenatal`), recorta con `optselect` (cota 0,0626; elimina 1 obs.) y **se queda solo con la muestra emparejada** (1.728 obs. de 4.642). | Alta |
+| 10 | Ej. 3 (d), `.do` | `pscore \`vars'` toma la **primera variable (`mmarried`) como tratamiento**. El `e_x` de los cuatro estimadores de (d) es el pscore de **estar casada**, no de fumar (el propio log lo dice: "The treatment is mmarried"; además "balancing property is not satisfied"). | Alta |
+| 11 | Ej. 3 (d)–(h), (R) vs. log | **Ningún número de (R) coincide con el log del `.do` actual** (ATT de −235 vs −194, etc.). Tabla más abajo. | Alta |
+| 12 | Ej. 3 (d), `.do` | Bootstrap con solo **10 repeticiones** y sin `set seed`: los errores estándar son muy imprecisos y no reproducibles; el NN con empates sorteados tampoco lo es. | Media |
+| 13 | Ej. 3 (e)–(h) | Se estiman sobre la **submuestra emparejada (N = 1.728)**, no sobre toda la muestra, así que no son el ATE poblacional que pide el enunciado. | Media |
+| 14 | Ej. 3 (g) | **IPW con tratamiento equivocado**: (R) reporta el efecto de **`mmarried`** (+103,1 "married vs notmarried"), no de fumar. El enunciado pide el ATE de fumar; con `mbsmoke` se esperaría un valor negativo cercano a RA/AIPW (≈ −200). | Alta (resultado erróneo) |
+| 15 | Ej. 3 (c), log | Tras el matching, `alcohol` sigue **desbalanceada** (p = 0,024). (R) no lo comenta. | Baja |
+| 16 | Ej. 4 | (R) escribe **E[·] alrededor del estimador** (ATE-hat = E(...)); un estimador no lleva esperanza. Además usa `p` sin definirlo. (S) tiene un typo `n¹` (debe ser n⁻¹). | Baja |
+
+---
+
+## Ejercicio 1 — Exact Matching
+
+**(P)** (Basado en Cunningham) Fumar aumenta la mortalidad, pero la afirmación no viene de datos experimentales.
+
+**Tabla 5.1.** Tasas de mortalidad por 1.000 personas-año (Cochran 1968)
+
+| Grupo | Canadá | UK | US |
+|---|---|---|---|
+| No fumadores | 20,2 | 11,3 | 13,5 |
+| Cigarrillos | 20,5 | 14,1 | 13,5 |
+| Cigars/pipes | 35,5 | 20,7 | 17,4 |
+
+**Tabla 5.2.** Edades medias (años)
+
+| Grupo | Canadá | UK | US |
+|---|---|---|---|
+| No fumadores | 54,9 | 49,1 | 57,0 |
+| Cigarrillos | 50,5 | 49,8 | 53,2 |
+| Cigars/pipes | 65,9 | 55,7 | 59,7 |
+
+> ⚠️ **DISCREPANCIA #5.** En el enunciado (P) y en (S), la Tabla 5.2 aparece dos veces (copia duplicada).
+
+### (a) Diferencia de medias, supuesto de independencia y otras observables
+
+**(S)** La diferencia de medias simple sugiere que fumar pipa o habanos se asocia a mayor mortalidad. Independencia: las medias de los **resultados potenciales** son iguales entre grupos, E[Y¹\|Cigarette] = E[Y¹\|Pipe] = E[Y¹\|Cigar] y E[Y⁰\|Cigarette] = E[Y⁰\|Pipe] = E[Y⁰\|Cigar]. Además, las **observables** no deberían diferir en promedio (grupos balanceados).
+
+**(R)** "El resultado que da la diferencia de medias entre grupos de fumadores en términos de tasa de mortalidad es 15, 6,6 y 3,9 para Canadá, UK, US. El supuesto de independencia pide que la media de la tasa de mortalidad entre grupos sea igual. En particular, se espera que las variables observables entre fumadores no deberían ser, en promedio, diferentes, es decir, los grupos deberían ser balanceados."
+
+> ⚠️ **DISCREPANCIA #1.** Los números de (R) coinciden con **cigars/pipes − cigarettes** (35,5−20,5 = 15,0; 20,7−14,1 = 6,6; 17,4−13,5 = 3,9), pero no lo aclara. La comparación natural es contra los **no fumadores**:
+>
+> | Comparación | Canadá | UK | US |
+> |---|---|---|---|
+> | Cigarrillos − No fumadores | 0,3 | 2,8 | 0,0 |
+> | Cigars/pipes − No fumadores | **15,3** | **9,4** | **3,9** |
+> | Cigars/pipes − Cigarrillos (lo que reporta (R)) | 15,0 | 6,6 | 3,9 |
+>
+> ⚠️ **DISCREPANCIA #2.** (R) dice que independencia pide que "la media de la tasa de mortalidad entre grupos sea igual". Eso describiría **ausencia de efecto**, no independencia. Lo que pide independencia (según (S)) es que las medias de los **resultados potenciales** sean iguales entre grupos. La parte sobre observables balanceadas sí coincide con (S).
+
+```{r ej1-diferencias}
+# Agregado para verificar las diferencias de la Tabla 5.1 (no está en el .R original)
+mort <- data.frame(
+  grupo  = c("No fumadores", "Cigarrillos", "Cigars/pipes"),
+  Canada = c(20.2, 20.5, 35.5),
+  UK     = c(11.3, 14.1, 20.7),
+  US     = c(13.5, 13.5, 17.4)
+)
+rbind(
+  "Cigarrillos - No fumadores"    = unlist(mort[2, -1] - mort[1, -1]),
+  "Cigars/pipes - No fumadores"   = unlist(mort[3, -1] - mort[1, -1]),
+  "Cigars/pipes - Cigarrillos"    = unlist(mort[3, -1] - mort[2, -1])
+)
+```
+
+### (b) Edad e independencia
+
+**(S)** La diferencia en edades por grupo (variable observada) está relacionada con el incumplimiento del supuesto de independencia.
+
+**(R)** "No se cumpliría, ya que esta característica no es independiente del resultado potencial."
+
+> ⚠️ **DISCREPANCIA #3 (menor).** La conclusión coincide con (S). Falta la evidencia que la sostiene: en la Tabla 5.2 los fumadores de cigars/pipes son mucho mayores (Canadá 65,9 vs 54,9 de no fumadores) y los de cigarrillos más jóvenes (50,5). Como la edad afecta la mortalidad, las diferencias de la Tabla 5.1 mezclan efecto de fumar con efecto de la edad.
+
+### (c) Estimar el efecto correcto
+
+**(R)** *(vacío, solo está el enunciado)*  **(S)** *(sin solución)*
+
+> ⚠️ **DISCREPANCIA #4.** No hay respuesta en ninguno de los dos PDFs. Con los datos del enunciado (solo edades **medias** por grupo) no se puede hacer el matching exacto por edad; haría falta la mortalidad por tramos de edad (Cunningham, Tabla 5.3).
+
+---
+
+## Ejercicio 2 — Teorema de Rosenbaum y Rubin
+
+**(P)** Demostrar que, bajo *unconfoundedness*, (Y(0), Y(1) ⊥ X \| e(W)) y, como corolario, ATE = E[ E[Y^obs \| X=1, e(W)] − E[Y^obs \| X=0, e(W)] ].
+
+**(S)** Basta probar P(X=1 \| Y(0), Y(1), e(W)) = P(X=1 \| e(W)). Como X es binaria:
+
+$$
+\begin{aligned}
+P(X=1\mid Y(0),Y(1),e(W)) &= E(X\mid Y(0),Y(1),e(W)) \\
+&= E\big(E(X\mid Y(0),Y(1),e(W),W)\mid Y(0),Y(1),e(W)\big) && \text{(LIE)}\\
+&= E\big(E(X\mid Y(0),Y(1),W)\mid Y(0),Y(1),e(W)\big) \\
+&= E\big(E(X\mid W)\mid Y(0),Y(1),e(W)\big) && \text{(unconfoundedness)}\\
+&= E\big(e(W)\mid Y(0),Y(1),e(W)\big) = e(W)
+\end{aligned}
+$$
+
+Luego P(X=1 \| Y(0),Y(1),e(W)) = P(X=1 \| e(W)) = P(X=1 \| W) = e(W) (eq. 4). Notas: (1) la condición E[Y(d)\|X=1,W] = E[Y(d)\|X=0,W] se relaja a E[Y(d)\|X=1,e(W)] = E[Y(d)\|X=0,e(W)]; (2) sugiere estimar e(W) y hacer matching sobre él (reduce la dimensionalidad); (3) *unconfoundedness* es necesario: el PSM no arregla su incumplimiento.
+
+**(R)** Escribe la cadena: P(X=1\|Y(0),Y(1),e(W)) = E(X\|…) = E(E(X\|Y(0),Y(1),e(W),W)\|…) = E(E(X\|W)\|…) = E(e(W)\|…) = e(W). Luego explica que el resultado implica independencia dado e(W), que permite calcular el ATE condicionando en el pscore, y repite las notas (2) y (3).
+
+> ⚠️ **DISCREPANCIA #6.** La conclusión y las notas (2) y (3) coinciden con (S), pero (R):
+> - **Salta un paso**: pasa de E(E(X\|Y(0),Y(1),e(W),W)\|…) directamente a E(E(X\|W)\|…), sin escribir que e(W) es función de W (por eso se puede sacar del condicionamiento) y sin nombrar *unconfoundedness* en ese paso ni LIE en el anterior.
+> - **No escribe la eq. (4)**, P(X=1\|Y(0),Y(1),e(W)) = P(X=1\|e(W)) = e(W): sin ella no queda explícito que se cumple la igualdad que se quería probar.
+> - **Omite la nota 1** (relajación de la condición de W a e(W)).
+> - Ni (R) ni (S) demuestran el corolario (el ATE como esperanza de diferencias condicionales); solo afirman que "se sigue".
+
+---
+
+## Ejercicio 3 — Propensity Score Matching
+
+**(P)** Impacto de **fumar durante el embarazo sobre el peso del bebé** (`bweight`), con `cattaneo2.dta`.
+
+El código completo está en `Datos/Trabajo Práctico N° 2.R`; acá va dividido por inciso. Primero, las funciones auxiliares (equivalentes a los `ado` de Stata):
+
+```{r ej3-helpers}
+library(haven)
+library(MatchIt)
+library(Matching)
+
+set.seed(12345)
+
+# Tabla de balance: medias por grupo y test de diferencia de medias (varianzas desiguales)
+balance <- function(d, vars, treat = "mbsmoke") {
+  res <- t(sapply(vars, function(v) {
+    x0 <- d[[v]][d[[treat]] == 0]
+    x1 <- d[[v]][d[[treat]] == 1]
+    tt <- t.test(x0, x1, var.equal = FALSE)
+    c(media0 = mean(x0), media1 = mean(x1), dif = mean(x0) - mean(x1),
+      t = unname(tt$statistic), p = tt$p.value)
+  }))
+  print(round(res, 4))
+}
+
+# psestimate (Imbens-Rubin): selección de términos lineales y cuadráticos del pscore
+psestimate <- function(d, treat, totry, C_lin = 1, C_qua = 2.71) {
+  D <- d[[treat]]
+  loglik <- function(X) -suppressWarnings(glm.fit(X, D, family = binomial())$deviance) / 2
+
+  forward <- function(X, cand, C) {
+    chosen <- character(0)
+    ll_cur <- loglik(X)
+    repeat {
+      rem <- setdiff(names(cand), chosen)
+      if (length(rem) == 0) break
+      stats <- sapply(rem, function(nm) {
+        Xn <- cbind(X, cand[[nm]])
+        if (qr(Xn)$rank <= ncol(X)) return(-Inf)
+        2 * (loglik(Xn) - ll_cur)
+      })
+      if (max(stats) <= C) break
+      best <- rem[which.max(stats)]
+      X <- cbind(X, cand[[best]])
+      ll_cur <- loglik(X)
+      chosen <- c(chosen, best)
+    }
+    list(X = X, chosen = chosen)
+  }
+
+  X0 <- matrix(1, nrow(d), 1)
+  lin <- forward(X0, setNames(lapply(totry, function(v) d[[v]]), totry), C_lin)
+
+  cand_q <- list()
+  sel <- lin$chosen
+  for (i in seq_along(sel)) for (j in i:length(sel)) {
+    if (length(sel) == 0) break
+    cand_q[[paste0(sel[i], "*", sel[j])]] <- d[[sel[i]]] * d[[sel[j]]]
+  }
+  qua <- forward(lin$X, cand_q, C_qua)
+
+  cat("Términos lineales seleccionados:", lin$chosen, "\n")
+  cat("Términos cuadráticos seleccionados:", qua$chosen, "\n")
+
+  fit <- suppressWarnings(glm.fit(qua$X, D, family = binomial()))
+  list(X = qua$X, pscore = fit$fitted.values)
+}
+
+# optselect (Crump, Hotz, Imbens y Mitnik 2009): cota óptima de recorte del pscore
+optselect <- function(ps) {
+  g <- 1 / (ps * (1 - ps))
+  if (max(g) <= 2 * mean(g)) {
+    cat("No es necesario recortar la distribución del pscore\n")
+    return(0)
+  }
+  a <- 0.0001
+  for (i in 1:100) {
+    gam <- mean(g[ps >= a & ps <= 1 - a])
+    a_new <- 0.5 - sqrt(0.25 - 1 / (2 * gam))
+    if (abs(a_new - a) < 1e-6) { a <- a_new; break }
+    a <- a_new
+    if (i == 100) { cat("No convergió; cota fijada en 0.10\n"); a <- 0.10 }
+  }
+  cat("Cota óptima =", a, "\n")
+  a
+}
+
+# pscore (Becker-Ichino): estimación del pscore y algoritmo de bloques
+pscore_blocks <- function(d, vars, treat = "mbsmoke", alpha = 0.005) {
+  f <- reformulate(vars, response = treat)
+  ps <- fitted(glm(f, data = d, family = binomial(link = "probit")))
+  D <- d[[treat]]
+
+  lo <- max(min(ps[D == 1]), min(ps[D == 0]))
+  hi <- min(max(ps[D == 1]), max(ps[D == 0]))
+  pending <- Map(c, seq(lo, hi, length.out = 6)[-6], seq(lo, hi, length.out = 6)[-1])
+  final <- list()
+  while (length(pending) > 0) {
+    b <- pending[[1]]; pending <- pending[-1]
+    inb <- ps >= b[1] & ps <= b[2]
+    p1 <- ps[inb & D == 1]; p0 <- ps[inb & D == 0]
+    split <- FALSE
+    if (length(p1) > 1 && length(p0) > 1) {
+      pv <- tryCatch(t.test(p1, p0)$p.value, error = function(e) 1)
+      split <- !is.na(pv) && pv < alpha && (b[2] - b[1]) > 1e-4
+    }
+    if (split) {
+      mid <- (b[1] + b[2]) / 2
+      pending <- c(pending, list(c(b[1], mid), c(mid, b[2])))
+    } else final <- c(final, list(b))
+  }
+  lower <- sort(sapply(final, `[`, 1))
+  blockid <- findInterval(ps, lower)
+  blockid[ps < lo | ps > hi] <- NA
+  cat("Número de bloques:", length(lower), "\n")
+  list(pscore = ps, blockid = blockid)
+}
+
+# Error estándar bootstrap de un estimador que depende de un vector de índices
+boot_se <- function(est, n, reps = 10) sd(replicate(reps, est(sample(n, replace = TRUE))))
+
+mostrar <- function(nombre, est, n, reps = 10) {
+  cat(sprintf("%-32s ATT = %10.4f   (EE bootstrap, %d reps = %.4f)\n",
+              nombre, est(seq_len(n)), reps, boot_se(est, n, reps)))
+}
+```
+
+### (a) Verificar si los grupos de control y tratamiento están balanceados
+
+**(R)** "Stata." (sin resultados)
+
+> ⚠️ **DISCREPANCIA #8.** (R) no reporta nada. Resultados del log del `.do` (antes del matching, 4.642 obs.: 3.778 no fumadoras y 864 fumadoras):
+>
+> | Variable | No fumadora | Fumadora | Dif. (no fum. − fum.) | t (Welch) |
+> |---|---|---|---|---|
+> | mmarried | 0,7515 | 0,4734 | 0,2781 | 15,12 |
+> | alcohol | 0,0188 | 0,0914 | −0,0726 | −7,22 |
+> | deadkids | 0,2459 | 0,3183 | −0,0724 | −4,18 |
+> | nprenatal | 10,963 | 9,862 | 1,1007 | 7,14 |
+> | monthslb | 21,898 | 28,220 | −6,3215 | −4,66 |
+> | prenatal | 1,1776 | 1,3079 | −0,1303 | −5,72 |
+> | fbaby | 0,4531 | 0,3715 | 0,0816 | 4,45 |
+>
+> ✅ Los grupos **no están balanceados** (todas las diferencias son significativas).
+
+```{r ej3-a}
+# Base y covariables (la ruta es relativa a la carpeta de este documento)
+dat <- as.data.frame(zap_labels(read_dta("Datos/cattaneo2.dta")))
+str(dat)
+
+vars <- c("mmarried", "alcohol", "deadkids", "nprenatal", "monthslb", "prenatal", "fbaby")
+
+# INCISO (a)
+for (g in 0:1) {
+  cat("\nmbsmoke =", g, "\n")
+  print(summary(dat[dat$mbsmoke == g, vars]))
+}
+```
+
+### (b) ¿Cuál es la diferencia de medias simple?
+
+**(R)** "Stata." (sin resultados)
+
+> ⚠️ **DISCREPANCIA #7.** El enunciado pregunta por la diferencia de medias **del peso del bebé** entre fumadoras y no fumadoras. En el `.do` el inciso (b) es un `ttest` de cada **covariable** por `mbsmoke` (balance), y en ningún lugar se calcula `bweight` por `mbsmoke`. Falta ese cálculo; lo agrego abajo (no está en el `.do` ni en el `.R` original). También se hace el balance, que es lo que sí hace el `.do`.
+
+```{r ej3-b}
+# INCISO (b), tal como está en el .do: test de diferencia de medias de las covariables
+balance(dat, vars)
+
+# AGREGADO: diferencia de medias simple del outcome (lo que pide el enunciado).
+# En Stata: ttest bweight, by(mbsmoke) unequal
+t.test(bweight ~ mbsmoke, data = dat, var.equal = FALSE)
+```
+
+### (c) Logit del tratamiento y soporte común
+
+**(R)** "Stata." (sin resultados)
+
+> ⚠️ **DISCREPANCIA #9.** El enunciado pide un **Logit de `mbsmoke` con las 7 variables** y definir un **soporte común**. El `.do` hace otra cosa:
+> 1. `psestimate` selecciona términos: las 7 lineales **más** `prenatal×mmarried`, `monthslb²` y `fbaby×prenatal`.
+> 2. Recorta con `optselect` (Crump et al.): cota **0,0626**, elimina **1** observación (no es el soporte común clásico mín/máx).
+> 3. `psmatch2 ..., noreplacement` y `keep if _weight==1` dejan **solo la muestra emparejada**: 864 fumadoras + 864 controles = **1.728 obs.** (se descartan 2.913).
+> 4. Luego `pscore \`vars'` se corre **sobre `mmarried`** (ver discrepancia #10) y se vuelve a testear el balance.
+>
+> ⚠️ **DISCREPANCIA #15.** Balance tras el matching (log): casi todo queda balanceado (|t| < 0,6) pero **`alcohol` sigue desbalanceada** (0,0625 vs 0,0914; t = −2,26; p = 0,024). (R) no lo menciona.
+
+```{r ej3-c}
+# INCISO (c)
+ps_sel <- psestimate(dat, "mbsmoke", vars)
+
+# Logit de mbsmoke sobre el índice lineal del pscore estimado
+h <- as.vector(ps_sel$X %*% coef(glm.fit(ps_sel$X, dat$mbsmoke, family = binomial())))
+dat$e_x <- fitted(glm(mbsmoke ~ h, data = dat, family = binomial()))
+
+bound <- optselect(dat$e_x)
+dat <- dat[dat$e_x >= bound & dat$e_x <= 1 - bound, ]
+
+# psmatch2, noreplacement: vecino más cercano 1 a 1 sin reemplazo
+m <- matchit(mbsmoke ~ e_x, data = dat, distance = dat$e_x,
+             method = "nearest", replace = FALSE, m.order = "data")
+dat <- match.data(m)
+dat$e_x <- NULL
+
+# OJO (discrepancia #10): en el .do, "pscore `vars'" toma la PRIMERA variable
+# (mmarried) como tratamiento (probit de mmarried sobre el resto). Se replica tal cual.
+pb <- pscore_blocks(dat, vars[-1], treat = vars[1])
+dat$e_x <- pb$pscore
+dat$blockid <- pb$blockid
+
+for (g in 0:1) {
+  cat("\nmbsmoke =", g, "\n")
+  print(summary(dat[dat$mbsmoke == g, vars]))
+}
+balance(dat, vars)
+```
+
+### (d) ATT con Propensity Score Matching (vecino más cercano, radio, kernel, estratificación)
+
+**(R)** Reporta las cuatro salidas de Stata (errores estándar bootstrap):
+
+| Estimador | n. tratadas / n. controles | ATT | EE | t |
+|---|---|---|---|---|
+| Nearest neighbor | 864 / 659 | −235,279 | 37,700 | −6,241 |
+| Radius | 863 / 864 | −246,371 | 34,574 | −7,126 |
+| Kernel | 864 / 864 | −229,593 | 31,817 | −7,216 |
+| Stratification | 864 / 864 | −227,836 | 25,709 | −8,862 |
+
+> ⚠️ **DISCREPANCIA #10.** El `e_x` que usan estos cuatro estimadores sale de `pscore \`vars'`, que toma `mmarried` como tratamiento: es el pscore de **estar casada**, no de fumar. El log lo dice ("The treatment is mmarried") y que "the balancing property is not satisfied". Para el pscore de fumar habría que correr `pscore mbsmoke \`vars'...`.
+>
+> ⚠️ **DISCREPANCIA #11.** **Los números de (R) no coinciden con el log del `.do` actual:**
+>
+> | Estimador | (R).pdf: ATT (EE) | Log del `.do` actual: ATT (EE) |
+> |---|---|---|
+> | Nearest neighbor | −235,279 (37,700) | −193,634 (45,977) |
+> | Radius | −246,371 (34,574) | −206,742 (27,680) |
+> | Kernel | −229,593 (31,817) | −191,658 (28,006) |
+> | Stratification | −227,836 (25,709) | −190,745 (35,545) |
+>
+> Los conteos coinciden (864/659, 863/864, 864/864), así que parece la misma estructura de muestra pero con **controles emparejados distintos**: `psmatch2, noreplacement` depende del orden de los datos y el `.do` no ordena ni fija semilla antes. Es una hipótesis: no puedo confirmarla sin correr Stata. Cuál versión es la "buena" depende de cuál se entregó.
+>
+> ⚠️ **DISCREPANCIA #12.** `bootstrap reps(10)` son solo **10 repeticiones** (los EE son muy inestables) y no hay `set seed`: ni los EE ni los emparejamientos con empates (NN) son reproducibles. Con tan pocas réplicas conviene subir a 200–500.
+
+```{r ej3-d}
+# INCISO (d)
+y <- dat$bweight
+D <- dat$mbsmoke
+ps <- dat$e_x
+blk <- dat$blockid
+n <- nrow(dat)
+
+# attnd: vecino más cercano (con reemplazo)
+att_nnd <- function(idx) {
+  yy <- y[idx]; DD <- D[idx]; pp <- ps[idx]
+  t <- which(DD == 1); c0 <- which(DD == 0)
+  nn <- sapply(pp[t], function(p) c0[which.min(abs(pp[c0] - p))])
+  mean(yy[t] - yy[nn])
+}
+
+# attr: radio (por defecto 0.1)
+att_rad <- function(idx, radius = 0.1) {
+  yy <- y[idx]; DD <- D[idx]; pp <- ps[idx]
+  t <- which(DD == 1); c0 <- which(DD == 0)
+  efectos <- sapply(t, function(i) {
+    w <- c0[abs(pp[c0] - pp[i]) < radius]
+    if (length(w) == 0) NA else yy[i] - mean(yy[w])
+  })
+  mean(efectos, na.rm = TRUE)
+}
+
+# attk: kernel normal, ancho de banda 0.06
+att_ker <- function(idx, bw = 0.06) {
+  yy <- y[idx]; DD <- D[idx]; pp <- ps[idx]
+  t <- which(DD == 1); c0 <- which(DD == 0)
+  efectos <- sapply(t, function(i) {
+    w <- dnorm((pp[c0] - pp[i]) / bw)
+    if (sum(w) == 0) NA else yy[i] - sum(w * yy[c0]) / sum(w)
+  })
+  mean(efectos, na.rm = TRUE)
+}
+
+# atts: estratificación por bloques
+att_str <- function(idx) {
+  yy <- y[idx]; DD <- D[idx]; bb <- blk[idx]
+  bl <- sort(unique(bb[!is.na(bb)]))
+  dif <- nt <- rep(NA_real_, length(bl))
+  for (k in seq_along(bl)) {
+    s <- !is.na(bb) & bb == bl[k]
+    if (any(DD[s] == 1) && any(DD[s] == 0)) {
+      dif[k] <- mean(yy[s & DD == 1]) - mean(yy[s & DD == 0])
+      nt[k] <- sum(s & DD == 1)
+    }
+  }
+  sum(dif * nt, na.rm = TRUE) / sum(nt, na.rm = TRUE)
+}
+
+cat("\nEstimaciones del ATT (Becker-Ichino)\n")
+mostrar("attnd (vecino más cercano)", att_nnd, n)
+mostrar("attr (radio 0.1)", att_rad, n)
+mostrar("attk (kernel normal, bw 0.06)", att_ker, n)
+mostrar("atts (estratificación)", att_str, n)
+```
+
+### (e) ATE con nearest-neighbour matching
+
+**(R)** Salida de `nnmatch` (SATE, 1 vecino, bias-adjust con las 7 covariables): **−209,5832** (EE 28,82159; IC95% [−266,0725; −153,0939]).
+
+> ⚠️ **DISCREPANCIA #11 (continúa).** El log del `.do` actual da **−186,6684** (EE 28,56529; IC [−242,6553; −130,6814]). Y ⚠️ **#13**: se estima sobre la submuestra emparejada (N = 1.728), no sobre toda la muestra.
+
+```{r ej3-e}
+# INCISO (e)
+nn <- Match(Y = y, Tr = D, X = ps, estimand = "ATE", M = 1,
+            BiasAdjust = TRUE, Z = as.matrix(dat[, vars]))
+summary(nn)
+```
+
+### (f), (g) y (h) — ajuste por regresión, IPW y doblemente robusto
+
+```{r ej3-fgh-setup}
+# INCISOS (f), (g), (h): regression adjustment, IPW y AIPW (ATE)
+X <- cbind(1, as.matrix(dat[, vars]))
+k <- ncol(X)
+
+ols <- function(s) {
+  b <- solve(crossprod(X[s, ]), crossprod(X[s, ], y[s]))
+  drop(b)
+}
+b1 <- ols(D == 1); b0 <- ols(D == 0)
+mu1 <- drop(X %*% b1); mu0 <- drop(X %*% b0)
+
+gfit <- suppressWarnings(glm.fit(X, D, family = binomial()))
+e <- gfit$fitted.values
+
+reportar <- function(nombre, ate, se) {
+  cat(sprintf("%-8s ATE = %10.4f   EE = %8.4f   z = %7.3f   IC95%% = [%.4f, %.4f]\n",
+              nombre, ate, se, ate / se, ate - 1.96 * se, ate + 1.96 * se))
+}
+```
+
+**(f) Ajuste por regresión.** **(R)**: ATE (smoker vs nonsmoker) = **−203,0403** (EE 26,27955; IC [−254,5473; −151,5334]); media de no fumadoras 3.343,881.
+
+> Log del `.do` actual: −189,7587 (EE 26,48683); media 3.330,599. ⚠️ **#11** (y #13: muestra emparejada).
+
+```{r ej3-f}
+# INCISO (f): regression adjustment
+ate_ra <- mean(mu1 - mu0)
+xbar <- colMeans(X)
+IFb1 <- (X * (D * (y - mu1))) %*% t(solve(crossprod(X[D == 1, ]) / n))
+IFb0 <- (X * ((1 - D) * (y - mu0))) %*% t(solve(crossprod(X[D == 0, ]) / n))
+psi <- (mu1 - mu0 - ate_ra) + drop(IFb1 %*% xbar) - drop(IFb0 %*% xbar)
+cat("\n")
+reportar("RA", ate_ra, sqrt(mean(psi^2) / n))
+```
+
+**(g) Inverse probability weighting.** **(R)**: ATE (**married vs notmarried**) = **+103,099** (EE 28,54709; IC [47,14773; 159,0503]); media de no casadas 3.191,532.
+
+> ⚠️ **DISCREPANCIA #14.** El enunciado pide el efecto de **fumar**. Lo que reporta (R) es el efecto de **estar casada**: el `.do` escribe `teffects ipw (bweight) (\`vars', logit)`, y Stata toma la primera variable de la lista (`mmarried`) como tratamiento. El signo positivo (+103) delata el problema: fumar reduce el peso (RA y AIPW dan ≈ −203). Corrección en Stata: `teffects ipw (bweight) (mbsmoke \`vars', logit), ate`. El log del `.do` actual da +126,1668 (EE 28,72463) para `mmarried`, así que además ⚠️ **#11**.
+>
+> El código R de abajo **replica el `.do` tal cual** (tratamiento = `mmarried`) y, **agregado**, calcula la versión correcta con `mbsmoke`.
+
+```{r ej3-g}
+# INCISO (g): IPW (pesos normalizados, pscore logit estimado)
+# OJO: en el .do, "teffects ipw (bweight) (`vars', logit)" toma la PRIMERA
+# variable (mmarried) como tratamiento, con el resto como covariables.
+# Se replica tal cual (el "ATE" es el efecto de estar casada).
+Dg <- dat$mmarried
+Xg <- X[, -2]  # constante + vars[-1]
+eg <- suppressWarnings(glm.fit(Xg, Dg, family = binomial()))$fitted.values
+w1 <- Dg / eg; w0 <- (1 - Dg) / (1 - eg)
+m1 <- sum(w1 * y) / sum(w1)
+m0 <- sum(w0 * y) / sum(w0)
+H <- crossprod(Xg * eg * (1 - eg), Xg) / n
+IFg <- (Xg * (Dg - eg)) %*% t(solve(H))
+A1 <- colMeans(Xg * (-Dg * (y - m1) * (1 - eg) / eg))
+A0 <- colMeans(Xg * ((1 - Dg) * (y - m0) * eg / (1 - eg)))
+psi1 <- (w1 * (y - m1) + drop(IFg %*% A1)) / mean(w1)
+psi0 <- (w0 * (y - m0) + drop(IFg %*% A0)) / mean(w0)
+reportar("IPW (mmarried)", m1 - m0, sqrt(mean((psi1 - psi0)^2) / n))
+```
+
+```{r ej3-g-correcto}
+# AGREGADO: IPW con el tratamiento que pide el enunciado (mbsmoke), con el pscore
+# logit sobre las 7 covariables y el mismo estimador (pesos normalizados + EE por
+# función de influencia).
+w1 <- D / e; w0 <- (1 - D) / (1 - e)
+m1 <- sum(w1 * y) / sum(w1)
+m0 <- sum(w0 * y) / sum(w0)
+H <- crossprod(X * e * (1 - e), X) / n
+IFg <- (X * (D - e)) %*% t(solve(H))
+A1 <- colMeans(X * (-D * (y - m1) * (1 - e) / e))
+A0 <- colMeans(X * ((1 - D) * (y - m0) * e / (1 - e)))
+psi1 <- (w1 * (y - m1) + drop(IFg %*% A1)) / mean(w1)
+psi0 <- (w0 * (y - m0) + drop(IFg %*% A0)) / mean(w0)
+reportar("IPW (mbsmoke)", m1 - m0, sqrt(mean((psi1 - psi0)^2) / n))
+```
+
+**(h) Estimador doblemente robusto (AIPW).** **(R)**: ATE (smoker vs nonsmoker) = **−203,1215** (EE 26,27575; IC [−254,621; −151,622]); media de no fumadoras 3.343,847.
+
+> Log del `.do` actual: −189,8151 (EE 26,48347); media 3.330,541. ⚠️ **#11** (y #13). RA y AIPW dan casi lo mismo en (R) (−203,04 vs −203,12) y en el log (−189,76 vs −189,82), lo cual es coherente.
+
+```{r ej3-h}
+# INCISO (h): AIPW (doblemente robusto)
+psi_aipw <- mu1 - mu0 + D * (y - mu1) / e - (1 - D) * (y - mu0) / (1 - e)
+ate_aipw <- mean(psi_aipw)
+reportar("AIPW", ate_aipw, sqrt(mean((psi_aipw - ate_aipw)^2) / n))
+```
+
+---
+
+## Ejercicio 4 — Estimador de matching sin características observables
+
+**(P)** Bajo *unconfoundedness* y con probabilidad de tratamiento que no depende de observables, obtener la expresión analítica del estimador PSM usando el corolario del Ejercicio 2.
+
+**(S)** Si no se condiciona en nada, X ⊥ Y y ATE = E[Y^obs\|X=1] − E[Y^obs\|X=0]. Con $\hat\mu_x = \dfrac{n^{-1}\sum Y_i\,\mathbb{1}\{X_i=x\}}{n^{-1}\sum \mathbb{1}\{X_i=x\}}$, el estimador es la diferencia de medias:
+
+$$
+\widehat{ATE}=\hat\mu_1-\hat\mu_0
+=\frac{n^{-1}\sum Y_i x_i}{\bar x}-\frac{n^{-1}\sum Y_i(1-x_i)}{1-\bar x}
+=n^{-1}\sum_{i=1}^n Y_i\,\frac{x_i-\bar x}{\bar x(1-\bar x)}
+$$
+
+**(R)** Llega a la misma expresión, pero escribe todo el desarrollo **envuelto en E[·]**: $\widehat{ATE}=E(\hat\mu_1-\hat\mu_0)$, …, $\widehat{ATE}=E\!\left(\frac{\sum Y_i\omega_i}{n}\right)$, con $\omega_i=\frac{x_i-\bar x}{\bar x(1-\bar x)}=\frac{x_i-p}{p(1-p)}$.
+
+> ✅ **Verificado:** el álgebra es correcta (x/x̄ − (1−x)/(1−x̄) = (x−x̄)/(x̄(1−x̄))) y coincide con (S).
+>
+> ⚠️ **DISCREPANCIA #16.** (a) (R) pone una **esperanza alrededor del estimador**: un estimador es una variable aleatoria de la muestra; $E[\cdot]$ es un parámetro, no una fórmula calculable. Debe ser $\widehat{ATE}=n^{-1}\sum Y_i\omega_i$, sin $E$. (b) Usa `p` en $\omega_i$ sin definirlo (es P(X=1), estimado por $\bar x$). (c) En (S) hay un typo: aparece $n^{1}$ donde debe ser $n^{-1}$ (el paso siguiente ya usa $n^{-1}$).
+
+```{r ej4-verificacion}
+# AGREGADO: verifica que n^-1 * sum(Y * w_i) == diferencia de medias
+set.seed(1)
+n_ <- 200
+x_ <- rbinom(n_, 1, 0.4)
+y_ <- rnorm(n_, 10 + 3 * x_)
+w_ <- (x_ - mean(x_)) / (mean(x_) * (1 - mean(x_)))
+all.equal(mean(y_ * w_), mean(y_[x_ == 1]) - mean(y_[x_ == 0]))   # TRUE
+```
+
+---
+
+## Anexo — Script completo en R
+
+El script completo está en [`Datos/Trabajo Práctico N° 2.R`](Datos/Trabajo%20Práctico%20N°%202.R). Los chunks de arriba son el mismo código dividido por inciso, con estas diferencias: la ruta del dato (`Datos/cattaneo2.dta`, relativa a este documento) y los cuatro bloques marcados "AGREGADO" (diferencias de la Tabla 5.1, diferencia de medias de `bweight`, IPW con `mbsmoke` y verificación del Ejercicio 4).

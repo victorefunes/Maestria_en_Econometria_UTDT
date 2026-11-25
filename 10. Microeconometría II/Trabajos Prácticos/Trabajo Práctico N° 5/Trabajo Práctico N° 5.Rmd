@@ -1,0 +1,278 @@
+---
+title: "Trabajo Práctico N° 5 — Variables Instrumentales"
+subtitle: "Microeconometría II · Maestría en Econometría UTDT"
+lang: es
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+---
+
+```{r setup, include=FALSE}
+# error = TRUE: si un chunk falla (por ejemplo, falta un paquete), el documento
+# igual se genera y muestra el error en ese lugar.
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, error = TRUE)
+```
+
+Este documento combina, para cada inciso: **(P)** el enunciado (`Trabajo Práctico N° 5 (P).pdf`), la **solución oficial** (`(S).pdf`, es el mismo enunciado con la solución del docente solo para el Ejercicio 1), **(R)** la resolución de `Trabajo Práctico N° 5 (R).pdf` y el **código en R** (`Datos/Trabajo Práctico N° 5.R`, convertido desde el `.do`).
+
+> ⚠️ **DISCREPANCIA** marca todo lo que no coincide o falta entre enunciado, solución oficial, resolución y código.
+> ✅ marca lo que verifiqué y está bien.
+> 💡 marca una **propuesta mía** (no está en los PDFs) para completar lo que falta.
+> El código **no se ejecutó** (R no está disponible en esta máquina). Como R y Stata usan generadores de números aleatorios distintos, las simulaciones de R **no darán los mismos números** que Stata aunque la semilla sea la misma.
+> Las rutas de los chunks son relativas a la carpeta de este documento (`Datos/...`).
+
+---
+
+## Resumen de discrepancias
+
+| # | Dónde | Qué pasa | Gravedad |
+|---|-------|----------|----------|
+| 1 | Ej. 1, (S) | La solución oficial llama $\beta_1^{IV}$ al estimador en el enunciado y **$\beta_2^{IV}$** al segundo elemento del vector; (R) mantiene $\beta_1$ (más claro). Ninguna aclara las **condiciones** (relevancia del instrumento: $\bar x_1\ne\bar x_0$; $n_0,n_1>0$). | Baja |
+| 2 | Ej. 2 (a)–(e), (R) | Todos los incisos dicen solo "Stata." y **no reportan resultados**. | Media |
+| 3 | Ej. 2 (b), enunciado vs. `.do` | El enunciado pide un efecto **constante igual a 20**. El `.do` genera `te ~ N(20, 10)` y además `y1 = y0 + te + N(0, 10)`: el efecto individual real es `te + ruido`, no 20. ATE y "LATE" salen de `te` (sin ruido). | Alta |
+| 4 | Ej. 2 (e), `.do` | El "LATE" que reporta el `.do` es **`mean(te)` entre los *compliers***, un valor "de oráculo" que usa información que no se observa. **No se calcula el estimador de Wald/IV**, que es lo que anuncia el título del ejercicio ("Estimador de Wald con datos simulados") y lo que se demostró en el Ej. 1. | Alta |
+| 5 | Ej. 2 (c), diseño del enunciado | Con 25% de *compliers* y 25% de *defiers* **no vale monotonicidad** y el primer estadio es $\pi_c-\pi_d\approx0$: el estimador de Wald es un cociente de algo cercano a cero (inestable) y no identifica el LATE. Ni (R) ni (S) lo discuten. | Alta (conceptual) |
+| 6 | Ej. 2 (e), código | `ttest y, by(U)` de Stata usa varianzas iguales y la primera versión del R usaba Welch. **Corregido** en el `.R` (`var.equal = TRUE`). | Baja (ya corregida) |
+| 7 | Ej. 2 (a) | "N(100, 30)": el código usa **desvío 30**; ambiguo si 30 fuera la varianza. | Baja |
+| 8 | Ej. 2 (b), enunciado | El enunciado llama $D_i$ al indicador de la primera normal positiva y luego **redefine** $D_i$ en (c) según el tipo de individuo. El `.do` evita la confusión llamando `DD` al primero (el instrumento). | Baja |
+| 9 | Ej. 3 (a) y (b), (R) | **Sin respuesta** en (R) ni en (S). | Media |
+| 10 | Ej. 3 (c), (R) | Solo dice "Stata." sin resultados; la réplica está en el `.do` de Galiani y Schargrodsky. | Media |
+
+---
+
+## Ejercicio 1 — Estimador de Wald
+
+**(P)** En $y_i=\beta_0+\beta_1x_i+u_i$ con $x_i$ potencialmente endógena y un instrumento binario $z_i$, mostrar que
+
+$$\beta_1^{IV}=\frac{\bar y_1-\bar y_0}{\bar x_1-\bar x_0},$$
+
+donde $\bar y_1,\bar x_1$ ($\bar y_0,\bar x_0$) son las medias con $z=1$ ($z=0$).
+
+**(S) y (R)** (mismo desarrollo). Con $X=[\mathbf 1_n\ \ x]$ y $Z=[\mathbf 1_n\ \ z]$, $\beta^{IV}=(Z'X)^{-1}Z'y$. Siendo $z$ binaria, $\sum z_i=n_1$, $\sum z_ix_i=\sum_{z_i=1}x_i$ y $\sum z_iy_i=\sum_{z_i=1}y_i$:
+
+$$Z'X=\begin{bmatrix}n&\sum_{i}x_i\\ n_1&\sum_{z_i=1}x_i\end{bmatrix},\qquad (Z'X)^{-1}=\frac{1}{n\sum_{z_i=1}x_i-n_1\sum_i x_i}\begin{bmatrix}\sum_{z_i=1}x_i&-\sum_i x_i\\ -n_1&n\end{bmatrix}$$
+
+El elemento de la pendiente es
+
+$$\beta_1^{IV}=\frac{n\sum_{z_i=1}y_i-n_1\sum_i y_i}{n\sum_{z_i=1}x_i-n_1\sum_i x_i}
+=\frac{n_0\sum_{z_i=1}y_i-n_1\sum_{z_i=0}y_i}{n_0\sum_{z_i=1}x_i-n_1\sum_{z_i=0}x_i}
+=\frac{n_0n_1\,\bar y_1-n_0n_1\,\bar y_0}{n_0n_1\,\bar x_1-n_0n_1\,\bar x_0}=\frac{\bar y_1-\bar y_0}{\bar x_1-\bar x_0}.$$
+
+> ✅ **Verificado:** el desarrollo de (R) es correcto en cada paso y coincide con (S) (matriz $Z'X$, inversa, reemplazo de $n-n_1=n_0$ y simplificación final).
+>
+> ⚠️ **DISCREPANCIA #1 (menor).** (S) nombra $\beta_1^{IV}$ al estimador del enunciado pero $\beta_2^{IV}$ al "segundo elemento" del vector; (R) usa $\beta_1$ de punta a punta, que es más claro. Ninguna de las dos aclara que el resultado exige $n_0,n_1>0$ y $\bar x_1\ne\bar x_0$ (relevancia del instrumento): si no, el determinante de $Z'X$ es cero y la inversa no existe.
+
+```{r ej1-verificacion}
+# AGREGADO (no está en el .R original): el estimador IV con instrumento binario
+# es el cociente de Wald.
+library(AER)
+
+set.seed(1)
+n  <- 500
+z  <- rbinom(n, 1, 0.5)
+u  <- rnorm(n)
+x  <- 0.8 * z + 0.5 * u + rnorm(n)      # x endógena (correlacionada con u)
+y  <- 1 + 2 * x + u
+
+wald <- (mean(y[z == 1]) - mean(y[z == 0])) / (mean(x[z == 1]) - mean(x[z == 0]))
+iv   <- coef(ivreg(y ~ x | z))[["x"]]
+all.equal(wald, iv)   # TRUE
+```
+
+---
+
+## Ejercicio 2 — Estimador de Wald con datos simulados
+
+**(P)** Extender la simulación del Problem Set 1 a un marco donde la asignación del tratamiento y quienes resultan tratados no son iguales.
+
+> ⚠️ **DISCREPANCIA #2.** En (R), los cinco incisos (a)–(e) dicen solo "Stata." y **no reportan resultados**. (S) tampoco da solución para este ejercicio.
+
+### (a) Muestra de 100 observaciones con $Y_0\sim\mathcal N(100,30)$
+
+**(R)** "Stata."
+
+> ⚠️ **DISCREPANCIA #7.** El código usa **desvío 30** (`rnorm(n, 100, 30)`). Si "30" fuera la varianza, habría que usar `sqrt(30)`.
+
+### (b) Efecto de tratamiento constante igual a 20 y variable de asignación
+
+**(P)** $TE_i=20$ para todo $i$; generar una normal estándar y una variable igual a 1 si es positiva.
+
+**(R)** "Stata."
+
+> ⚠️ **DISCREPANCIA #3.** El enunciado pide un efecto **constante igual a 20**, pero el `.do` (y el R) genera
+> ```
+> te <- rnorm(n, 20, 10)
+> y1 <- y0 + te + rnorm(n, 0, 10)
+> ```
+> o sea un efecto **heterogéneo** (`te ~ N(20, 10)`) y encima suma un ruido: el efecto individual real es $Y_1-Y_0=te+\text{ruido}$, que no es 20 ni `te`. Para respetar el enunciado: `te <- rep(20, n)` y `y1 <- y0 + te`.
+>
+> ⚠️ **DISCREPANCIA #8.** El enunciado llama $D_i$ a este primer indicador y en (c) vuelve a definir $D_i$ según el tipo de individuo. El `.do` lo llama **`DD`** y lo trata como el **instrumento** (asignación aleatoria); `D` queda para el tratamiento efectivamente recibido.
+
+```{r ej2-ab}
+# INCISO (a)
+set.seed(12345)
+n <- 100
+
+y0 <- rnorm(n, 100, 30)
+
+# INCISO (b)
+te <- rnorm(n, 20, 10)                 # ⚠️ el enunciado pide te = 20 constante (#3)
+y1 <- y0 + te + rnorm(n, 0, 10)        # ⚠️ ruido que no está en el enunciado (#3)
+
+DD <- as.numeric(rnorm(n) > 0)   # instrumento (asignación aleatoria)
+```
+
+### (c) Tipos de individuo y tratamiento efectivo
+
+**(P)** Con una uniforme en [0, 1]: *always taker* si es menor a 0,25; *never taker* entre 0,25 y 0,5; *defier* entre 0,5 y 0,75; *complier* si es mayor a 0,75. Generar la variable de si toman el tratamiento según el grupo.
+
+**(R)** "Stata."
+
+> ✅ El código respeta las reglas del enunciado: `D = 1` para *always takers*, `D = 0` para *never takers*, `D = DD` para *compliers* y `D = 1 − DD` para *defiers*.
+>
+> ⚠️ **DISCREPANCIA #5 (diseño).** Con 25% de *compliers* y 25% de *defiers*:
+> - **No vale monotonicidad** (hay *defiers*), supuesto necesario para que Wald identifique el LATE (Imbens y Angrist).
+> - El **primer estadio** es $E[D\mid DD=1]-E[D\mid DD=0]=\pi_c-\pi_d=0{,}25-0{,}25=0$: el instrumento no mueve, en promedio, la probabilidad de tratarse. El cociente de Wald divide por algo cercano a cero y sale **inestable** (puede dar valores enormes o de cualquier signo) y no estima el efecto sobre los *compliers*.
+>
+> Ni (R) ni (S) mencionan esto. 💡 En el chunk "AGREGADO" de (e) muestro el primer estadio y una variante con monotonicidad (los *defiers* pasan a no tomar el tratamiento).
+
+```{r ej2-c}
+# INCISO (c)
+random2 <- runif(n, 0, 1)
+
+alwaystaker <- as.numeric(random2 < 0.25)
+nevertaker  <- as.numeric(random2 >= 0.25 & random2 < 0.5)
+defier      <- as.numeric(random2 >= 0.5 & random2 < 0.75)
+complier    <- as.numeric(random2 > 0.75)
+
+D <- rep(0, n)
+D[alwaystaker == 1] <- 1
+D[nevertaker == 1]  <- 0
+D[complier == 1]    <- DD[complier == 1]
+D[defier == 1]      <- 1 - DD[defier == 1]
+```
+
+### (d) Variable $Y$ observada
+
+**(R)** "Stata."  ✅ El código usa $Y=DY_1+(1-D)Y_0$, como pide el enunciado.
+
+```{r ej2-d}
+# INCISO (d)
+y <- D * y1 + (1 - D) * y0
+```
+
+### (e) Estimar el LATE y compararlo con el ATE
+
+**(R)** "Stata."
+
+> ⚠️ **DISCREPANCIA #4.** El enunciado pide **estimar** el LATE, y el título del ejercicio es "Estimador de Wald". El `.do` hace otra cosa: reporta
+> - resúmenes de `y` por `DD` y por `D`, y un `ttest` de `y` por `D` (la comparación ingenua entre tratados y no tratados, que está sesgada por la autoselección);
+> - "**LATE**" = `mean(te)` entre *compliers* y "**ATE**" = `mean(te)` en toda la muestra.
+>
+> Esos dos son los valores **verdaderos** (de "oráculo": usan los tipos, que en datos reales no se observan) y además se calculan con `te` sin el ruido de `y1` (⚠️ #3). El **estimador** de Wald, $\dfrac{\bar y\mid DD=1-\bar y\mid DD=0}{\bar D\mid DD=1-\bar D\mid DD=0}$ (Ej. 1), **no se calcula en ningún lado**.
+>
+> ⚠️ **DISCREPANCIA #6 (corregida).** `ttest` de Stata supone varianzas iguales; el R usaba Welch. Ahora usa `var.equal = TRUE`.
+
+```{r ej2-e}
+# INCISO (e)
+for (g in 0:1) {
+  cat("\nDD =", g, "\n")
+  print(summary(y[DD == g]))
+}
+for (g in 0:1) {
+  cat("\nD =", g, "\n")
+  print(summary(y[D == g]))
+}
+# Stata: ttest ..., by() usa varianzas iguales por defecto (var.equal = TRUE)
+print(t.test(y[D == 1], y[D == 0], var.equal = TRUE))
+
+cat("LATE =", mean(te[complier == 1]), "\n")
+cat("ATE =", mean(te), "\n")
+```
+
+```{r ej2-wald}
+# AGREGADO (no está en el .do ni en el .R original): estimador de Wald/IV con los datos
+# simulados, para compararlo con los valores verdaderos.
+primer_estadio <- mean(D[DD == 1]) - mean(D[DD == 0])
+forma_reducida <- mean(y[DD == 1]) - mean(y[DD == 0])
+wald           <- forma_reducida / primer_estadio
+
+# Efectos verdaderos usando y1 - y0 (incluye el ruido de y1)
+efecto_ind <- y1 - y0
+c(primer_estadio = primer_estadio,                    # ≈ 0 (pi_c - pi_d), ver #5
+  wald           = wald,                              # inestable
+  LATE_verdadero = mean(efecto_ind[complier == 1]),
+  ATE_verdadero  = mean(efecto_ind))
+
+# Mismo resultado con 2SLS
+print(summary(ivreg(y ~ D | DD)))
+```
+
+```{r ej2-monotonicidad}
+# AGREGADO: variante con monotonicidad (sin defiers). Los defiers pasan a no tratarse.
+# Ahora el primer estadio es la proporción de compliers y Wald estima el LATE.
+D_m <- D
+D_m[defier == 1] <- 0
+y_m <- D_m * y1 + (1 - D_m) * y0
+
+pe_m   <- mean(D_m[DD == 1]) - mean(D_m[DD == 0])
+wald_m <- (mean(y_m[DD == 1]) - mean(y_m[DD == 0])) / pe_m
+c(primer_estadio = pe_m,                              # ≈ 0.25
+  wald           = wald_m,
+  LATE_verdadero = mean(efecto_ind[complier == 1]))    # Wald ≈ LATE (con error muestral)
+```
+
+---
+
+## Ejercicio 3 — Galiani & Schargrodsky (2010)
+
+**(P)** Leer *Property rights for the poor: Effects of land titling*.
+
+### (a) ¿Qué efectos intentan estimar en el paper?
+
+**(R)** *(sin respuesta)*  **(S)** *(sin solución)*
+
+> ⚠️ **DISCREPANCIA #9.** 💡 **Respuesta sugerida (mía, según recuerdo del paper; conviene verificarla):** el efecto de **otorgar títulos de propiedad** a familias de bajos recursos que ocuparon terrenos sobre (i) la **inversión en vivienda** (paredes, techo, superficie construida, aspecto general), (ii) el **tamaño y la composición del hogar** (menos hijos adolescentes y más inversión en capital humano por hijo), (iii) la **educación de los hijos** y (iv) el **acceso al crédito y el ingreso**. Las tablas del `.do` (Tablas 3 a 8 y A.1 a A.17) siguen ese orden.
+
+### (b) ¿Cuál es la estrategia de identificación? ¿Por qué no funciona la diferencia de medias simple?
+
+**(R)** *(sin respuesta)*  **(S)** *(sin solución)*
+
+> ⚠️ **DISCREPANCIA #9.** 💡 **Respuesta sugerida (mía):** la estrategia es un **experimento natural**. Los ocupantes tomaron terrenos que luego fueron expropiados; los **dueños originales** decidieron (o no) aceptar la compensación, y esa decisión determinó si los ocupantes de cada parcela recibían el título. Como la asignación depende de la decisión del dueño y no de las características del ocupante, tratados y controles resultan comparables (el paper lo muestra con la Tabla 1 de balance; en el `.do`, `ttest ... by(propertyOffer)`). La **oferta** del título (`propertyOffer`) es el instrumento y el **título efectivamente recibido** (`propertyRight`) el tratamiento, porque no todos los que reciben la oferta terminan con el título: de ahí el análisis IV (Tablas 4 y A.1–A.4, columna 8). En general, la **diferencia de medias simple** entre hogares con y sin título no funciona porque quienes consiguen un título pueden diferir en observables y no observables (ingresos, redes, antigüedad), que también afectan la inversión y los demás resultados.
+
+### (c) Replicar los resultados del paper
+
+**(R)** "Stata."
+
+> ⚠️ **DISCREPANCIA #10.** (R) no incluye ningún resultado. La réplica completa está en `JPubE - Galiani and Schargrodsky - Property rights for the poor.do`, y su traducción a R en `JPubE - Galiani and Schargrodsky - Property rights for the poor.R`. Abajo, un ejemplo mínimo (agregado) que conecta con el Ejercicio 1: **Wald a mano con la oferta como instrumento** frente a la estimación IV (la columna 8 de la Tabla 4, pero sin covariables).
+
+```{r ej3-wald}
+# AGREGADO: Wald a mano con propertyOffer como instrumento y propertyRight como tratamiento
+# (Tabla 4, columna 8, pero sin covariables). Resultado: goodWalls.
+library(haven)
+
+inv <- as.data.frame(zap_labels(read_dta(
+  "Datos/JPubE - Galiani and Schargrodsky - Property rights for the poor - investment.dta")))
+
+S <- which(inv$neighborhood < 5 & inv$repeatedParcel == 0 & inv$inBothDatasets == 3 &
+             is.na(inv$nonSurveyed) & inv$householdArrivedBefore1986 == 1)
+d <- inv[S, c("goodWalls", "propertyRight", "propertyOffer")]
+d <- d[complete.cases(d), ]
+
+forma_reducida <- mean(d$goodWalls[d$propertyOffer == 1]) - mean(d$goodWalls[d$propertyOffer == 0])
+primer_estadio <- mean(d$propertyRight[d$propertyOffer == 1]) - mean(d$propertyRight[d$propertyOffer == 0])
+wald_gs <- forma_reducida / primer_estadio
+
+c(forma_reducida = forma_reducida, primer_estadio = primer_estadio, wald = wald_gs)
+
+# Debe coincidir con 2SLS sin covariables
+print(coef(ivreg(goodWalls ~ propertyRight | propertyOffer, data = d))[["propertyRight"]])
+```
+
+---
+
+## Anexo — Scripts en R
+
+- Ejercicios 1 y 2: [`Datos/Trabajo Práctico N° 5.R`](Datos/Trabajo%20Práctico%20N°%205.R). Los chunks de arriba son el mismo código dividido por inciso (con `var.equal = TRUE` ya corregido) más los bloques marcados "AGREGADO" (verificación de Wald del Ejercicio 1, estimador de Wald con los datos simulados, variante con monotonicidad y Wald con la oferta de título como instrumento en el Ejercicio 3).
+- Ejercicio 3: la réplica completa está en [`Datos/JPubE - Galiani and Schargrodsky - Property rights for the poor.R`](Datos/JPubE%20-%20Galiani%20and%20Schargrodsky%20-%20Property%20rights%20for%20the%20poor.R).

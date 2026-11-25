@@ -1,0 +1,342 @@
+---
+title: "Trabajo Práctico N° 1 — Modelo de Resultados Potenciales"
+subtitle: "Microeconometría II · Maestría en Econometría UTDT"
+lang: es
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+Microeconometría II · Maestría en Econometría UTDT
+
+Este documento combina, para cada inciso: **(P)** el enunciado (`Trabajo Práctico N° 1 (P).pdf`), **(R)** la respuesta del PDF de resolución (`Trabajo Práctico N° 1 (R).pdf`) y el **código en R** (`Datos/Trabajo Práctico N° 1.R`, convertido desde el `.do`).
+
+> ⚠️ **DISCREPANCIA** marca todo lo que no coincide entre enunciado, respuesta y código.
+> ✅ marca lo que verifiqué y está bien.
+> Los resultados numéricos de R **no se ejecutaron** (R no está disponible en esta máquina); las verificaciones numéricas de abajo son cuentas hechas a mano con los datos de los cuadros.
+
+---
+
+## Resumen de discrepancias
+
+| # | Dónde | Qué pasa | Gravedad |
+|---|-------|----------|----------|
+| 1 | Ej. 1 (d) | La respuesta calcula la **media de Y** (84/11 = 7,63) y la llama ATE. Lo que pide el enunciado es la **diferencia de medias observada** entre tratados y no tratados: **1,0333**. | Alta (resultado erróneo) |
+| 2 | Ej. 1 (e) | No se calcula la diferencia pedida. Con (d) corregido es 1,0333 − (−0,3636) = **1,3970**. Además, el sesgo surge al usar resultados **observados**, no "al calcular los resultados potenciales". | Media |
+| 3 | Ej. 3 (b) | La fórmula de la respuesta usa **(1 + π)(ATT − ATU)**; debe ser **(1 − π)(ATT − ATU)**. Contradice la propia descripción de abajo ("proporción en el grupo de control" = 1 − π). | Alta (fórmula errónea) |
+| 4 | Ej. 3 (a) | La derivación es correcta, pero **no describe π** (el enunciado lo pide): π = P(D=1), la proporción de tratados. | Media |
+| 5 | Ej. 3 (d)–(g), enunciado vs. código | El enunciado dice efecto de tratamiento **constante e igual a 20** y `Y1 = Y0 + TE`. El `.do` (y el R) genera `Y1 = Y0 + TE + N(0,10)`: el efecto individual real es `TE + ruido`, **no** `TE`. Los ATE/ATT/ATU que se reportan salen de `te` (sin ruido), no de `y1 − y0`. | Alta (el código no hace lo que dice el enunciado) |
+| 6 | Ej. 3 (d)–(g), código Stata vs. R | `ttest` de Stata usa varianzas iguales; mi primera versión en R usaba Welch. **Corregido** en el R (`var.equal = TRUE`). | Baja (ya corregida) |
+| 7 | Ej. 3 (h) | El PDF de respuestas **no contiene respuesta** (solo el enunciado). Abajo dejo una conclusión esperada (propuesta mía, no del PDF). | Media |
+| 8 | Ej. 2 (b)–(e) y Ej. 3 (c)–(g) | La respuesta dice solo "Stata." y **no reporta resultados** (ni la media de las 10.000 diferencias ni los tests). | Media |
+| 9 | Enunciado (P), Ej. 3 | Typo del enunciado: la ecuación (1) está rotulada "ATT" (debe ser **ATE**) y la consigna (a) dice "Muestre que ATT = πATT + …". El PDF de respuestas lo corrige a ATE. | Baja |
+| 10 | Ej. 3 (c) | "N(100, 30)": el código usa **desvío 30** (`rnormal(100,30)` / `rnorm(n,100,30)`). Si el enunciado quisiera varianza 30, el desvío sería √30. Es ambiguo; el código es consistente con la lectura "desvío". | Baja |
+
+---
+
+## Ejercicio 1 — Resultados potenciales, sesgo de selección y el médico perfecto
+
+**(P)** Once pacientes con COVID-19; tratamientos: ventiladores (T) y reposo en cama (C). Valores más altos = mejor resultado.
+
+**Cuadro 1.** (columnas TE, S, Y completadas según la respuesta del PDF)
+
+| Paciente | Y_T | Y_C | TE | S | Y |
+|---|---|---|---|---|---|
+| 1 | 1 | 10 | −9 | 0 | 10 |
+| 2 | 1 | 5 | −4 | 0 | 5 |
+| 3 | 1 | 4 | −3 | 0 | 4 |
+| 4 | 5 | 6 | −1 | 0 | 6 |
+| 5 | 5 | 1 | 4 | 1 | 5 |
+| 6 | 9 | 7 | 2 | 1 | 9 |
+| 7 | 6 | 8 | −2 | 0 | 8 |
+| 8 | 7 | 10 | −3 | 0 | 10 |
+| 9 | 8 | 2 | 6 | 1 | 8 |
+| 10 | 9 | 6 | 3 | 1 | 9 |
+| 11 | 10 | 7 | 3 | 1 | 10 |
+
+### (a) Efecto del tratamiento de cada paciente (TE)
+
+**(R)** TE = Y_T − Y_C, columna completada en el Cuadro 1. ✅ Verificado: los 11 valores son correctos.
+
+### (b) ATE y qué intervención es más efectiva
+
+**(R)** ATE = Σ TE / 11 = −4/11 = **−0,36̄**. En promedio, el reposo en cama es más efectivo. ✅ Verificado (Σ TE = −4).
+
+### (c) El médico perfecto: columna S y columna Y
+
+**(R)** Recibe ventiladores quien tiene TE > 0: pacientes **5, 6, 9, 10, 11** (S = 1). Y observada: 10, 5, 4, 6, 5, 9, 8, 10, 8, 9, 10. ✅ Verificado.
+
+### (d) "ATE" con el médico perfecto (calculado con los datos observados)
+
+**(R)** ATE = Σ Y / 11 = 84/11 = **7,63̄**.
+
+> ⚠️ **DISCREPANCIA #1.** 84/11 es la media de Y de **toda** la muestra, que no es un efecto de tratamiento. Con los datos observados, el estimador pedido es la diferencia de medias entre tratados (S=1) y no tratados (S=0):
+>
+> - Tratados (5, 6, 9, 10, 11): Y = 5, 9, 8, 9, 10 → media = 41/5 = **8,2**
+> - No tratados (1, 2, 3, 4, 7, 8): Y = 10, 5, 4, 6, 8, 10 → media = 43/6 = **7,1667**
+> - **Diferencia = 1,0333** (= 31/30)
+
+### (e) Diferencia con el ATE del inciso (b) y cuál es el correcto
+
+**(R)** "El primero aparece un sesgo de selección cuando se calculan los resultados potenciales. El resultado correcto es el del inciso (b), ya que es el verdadero ATE."
+
+> ⚠️ **DISCREPANCIA #2.** La conclusión (el correcto es (b)) está bien, pero:
+> - No se calcula la diferencia numérica pedida: con (d) corregido, **1,0333 − (−0,3636) = 1,3970** (el naive da un efecto positivo; el verdadero ATE es negativo).
+> - El sesgo aparece al comparar resultados **observados** de grupos que se autoseleccionaron (el médico asigna según el beneficio), no "al calcular los resultados potenciales".
+>
+> **Verificación con la descomposición del Ej. 3 (b)** (π = 5/11; ATT = 18/5 = 3,6; ATU = −22/6 = −3,667):
+>
+> | Término | Valor |
+> |---|---|
+> | ATE | −0,3636 |
+> | Sesgo de selección = E[Y0\|D=1] − E[Y0\|D=0] = 4,6 − 7,1667 | −2,5667 |
+> | Sesgo por heterogeneidad = (1 − π)(ATT − ATU) = (6/11)(7,2667) | +3,9636 |
+> | **Suma** | **1,0333** ✅ (coincide con la diferencia de medias) |
+>
+> Con la fórmula del PDF, (1 + π)(ATT − ATU) = (16/11)(7,2667) = 10,57, la suma **no cierra** → confirma la discrepancia #3.
+
+### Código en R (verificación del Ejercicio 1, **agregado** — no está en el `.R` original)
+
+```{r chunk1}
+yT <- c(1, 1, 1, 5, 5, 9, 6, 7, 8, 9, 10)
+yC <- c(10, 5, 4, 6, 1, 7, 8, 10, 2, 6, 7)
+
+TE <- yT - yC                      # (a)
+ATE <- mean(TE)                    # (b)  -0.3636
+
+S <- as.numeric(TE > 0)            # (c)  médico perfecto
+Y <- S * yT + (1 - S) * yC
+
+mean(Y)                            # 7.6364  <- lo que reporta el PDF en (d)
+mean(Y[S == 1]) - mean(Y[S == 0])  # (d)  1.0333  <- diferencia de medias observada
+mean(Y[S == 1]) - mean(Y[S == 0]) - ATE   # (e)  1.3970
+
+# Descomposición (Ej. 3 b)
+pi_ <- mean(S)
+ATT <- mean(TE[S == 1]); ATU <- mean(TE[S == 0])
+sesgo_sel <- mean(yC[S == 1]) - mean(yC[S == 0])
+c(ATE = ATE, sesgo_sel = sesgo_sel, het = (1 - pi_) * (ATT - ATU),
+  suma = ATE + sesgo_sel + (1 - pi_) * (ATT - ATU))   # suma = 1.0333
+```
+
+---
+
+## Ejercicio 2 — Simulación de Monte Carlo
+
+**(P)** Mostrar, con Monte Carlo, que bajo independencia la diferencia de medias identifica el ATE.
+
+**Cuadro 2.**
+
+| Paciente | Y_T | Y_C |
+|---|---|---|
+| 1 | 7 | 1 |
+| 2 | 5 | 6 |
+| 3 | 5 | 1 |
+| 4 | 7 | 8 |
+| 5 | 4 | 2 |
+| 6 | 10 | 1 |
+| 7 | 1 | 10 |
+| 8 | 5 | 6 |
+| 9 | 3 | 7 |
+| 10 | 9 | 8 |
+
+### (a) Calcular el ATE
+
+**(R)** ATE = Σ TE / 10 = 6/10 = **0,6**. ✅ Verificado (TE = 6, −1, 4, −1, 2, 9, −9, −1, −4, 1).
+
+### (b)–(e) Normal estándar, orden, asignación de d, diferencia de medias y 10.000 repeticiones
+
+**(R)** "Stata." (sin resultados reportados).
+
+> ⚠️ **DISCREPANCIA #8.** El PDF no informa la diferencia de medias de una corrida ni la media de las 10.000 diferencias. Con asignación aleatoria de 5 tratados y 5 controles esa media debería ser ≈ **0,6** (= ATE). Los datos del código coinciden con el Cuadro 2 ✅ (`y1` y `y0` reproducen las columnas Y_T e Y_C).
+
+**Código (R).** Equivale a: generar una normal por observación, ordenar y asignar d = 1 a las primeras 5 es lo mismo que sortear al azar qué 5 de 10 reciben el tratamiento.
+
+```{r chunk2}
+reps <- 10000
+
+y1 <- c(7, 5, 5, 7, 4, 10, 1, 5, 3, 9)
+y0 <- c(1, 6, 1, 8, 2, 1, 10, 6, 7, 8)
+
+set.seed(12345)
+
+simulation <- function() {
+  # Asignación aleatoria: 5 tratados y 5 controles
+  d <- sample(c(rep(1, 5), rep(0, 5)))
+  y <- d * y1 + (1 - d) * y0
+  mean(y[d == 1]) - mean(y[d == 0])
+}
+
+dif <- replicate(reps, simulation())
+
+print(summary(dif))
+cat("La media de las diferencias de medias de cada simulación es", mean(dif), "\n")
+```
+
+---
+
+## Ejercicio 3 — Efectos de tratamiento y heterogeneidad
+
+**(P)** Definiciones: ATE = E[Y_T − Y_C], ATT = E[Y_T − Y_C | D=1], ATU = E[Y_T − Y_C | D=0]. Descomposición según el cap. 4 de *Causal Inference: The Mixtape* (Cunningham).
+
+> ⚠️ **DISCREPANCIA #9 (enunciado).** En el PDF de enunciado, la ecuación (1) aparece como "ATT" y la consigna (a) dice "Muestre que ATT = πATT + (1−π)ATU". Son typos: debe decir **ATE**. El PDF de respuestas lo escribe bien.
+
+### (a) Mostrar que ATE = π·ATT + (1 − π)·ATU y describir π
+
+**(R)**
+```
+ATE = E(Y_T − Y_C)
+    = E( E(Y_T − Y_C | D) )
+    = π·E(Y_T − Y_C | D=1) + (1 − π)·E(Y_T − Y_C | D=0)
+    = π·ATT + (1 − π)·ATU
+```
+
+> ⚠️ **DISCREPANCIA #4.** La derivación es correcta (ley de esperanzas iteradas), pero **falta describir π**, que el enunciado pide: **π = P(D = 1)**, la proporción de la población que recibe el tratamiento (en muestra, N_T / N). Los ponderadores son las proporciones de tratados y de no tratados.
+
+### (b) Interpretar ȳ₁ − ȳ₀ = ATE + sesgo de selección + sesgo por heterogeneidad
+
+**(R)**
+```
+(1/N_T) Σ (y_i | d_i=1) − (1/N_C) Σ (y_i | d_i=0)
+   = E(Y¹) − E(Y⁰)  +  E(Y⁰|D=1) − E(Y⁰|D=0)  +  (1 + π)(ATT − ATU)
+```
+- *Sesgo de selección:* diferencia entre los dos grupos si nunca se hubiera realizado el tratamiento.
+- *Sesgo por heterogeneidad:* diferencia en los retornos del tratamiento entre los dos grupos, multiplicada por la proporción de la población en el grupo de control.
+
+> ⚠️ **DISCREPANCIA #3.** El término debe ser **(1 − π)(ATT − ATU)**, no (1 + π). Con (1 + π) el ponderador excede 1 y no coincide con la descripción de abajo ("proporción en el grupo de control" = 1 − π). La suma numérica del Ej. 1 (e) confirma que solo (1 − π) cierra la identidad. Las descripciones verbales de los dos sesgos están bien.
+
+### (c) Muestra de 100 observaciones con Y₀ ~ N(100, 30)
+
+**(R)** "Stata."
+
+> ⚠️ **DISCREPANCIA #10 (ambigüedad).** El código usa **desvío estándar 30**. Si "30" fuera la varianza, habría que usar `rnorm(n, 100, sqrt(30))`.
+
+**Código (R)** — datos y función de resumen compartida por (d)–(g):
+
+```{r chunk3}
+set.seed(12345)
+n <- 100
+
+y0 <- rnorm(n, 100, 30)
+
+# Resumen de resultados (equivalente a summarize / ttest / ATE-ATT-ATU de Stata)
+resumen <- function(y, tr, te) {
+  for (g in 0:1) {
+    cat("\n", if (g == 1) "Tratados" else "Controles", " (D = ", g, ")\n", sep = "")
+    print(summary(y[tr == g]))
+  }
+  # Stata: ttest ..., by() usa varianzas iguales por defecto (var.equal = TRUE)
+  print(t.test(y[tr == 1], y[tr == 0], var.equal = TRUE))
+  cat("ATE =", mean(te), "\n")
+  cat("ATT =", mean(te[tr == 1]), "\n")
+  cat("ATU =", mean(te[tr == 0]), "\n")
+}
+```
+
+> ⚠️ **DISCREPANCIA #6 (ya corregida).** `ttest` de Stata supone varianzas iguales; la primera versión del R usaba Welch (`t.test` por defecto). Ahora usa `var.equal = TRUE`, igual que Stata.
+
+### (d) Efecto constante TE = 20, D = 1 si la normal es positiva
+
+**(R)** "Stata."
+
+> ⚠️ **DISCREPANCIA #5 (enunciado vs. código).** El enunciado fija `TE_i = 20` para todos (y entonces `Y1 = Y0 + 20`). El código genera `Y1 = Y0 + te + N(0,10)`, de modo que el efecto individual verdadero es `y1 − y0 = 20 + ruido`, que **no es constante**. Como ATE/ATT/ATU se calculan sobre `te`, no sobre `y1 − y0`, el resumen muestra exactamente 20 (ATE = ATT = ATU = 20) aunque el ATE "real" de la muestra difiera ligeramente de 20 por el ruido. Para respetar el enunciado habría que quitar `+ rnorm(n, 0, 10)` (o calcular los efectos como `y1 − y0`). Aplica también a (e), (f) y (g).
+
+```{r chunk4}
+te <- rep(20, n)
+y1 <- y0 + te + rnorm(n, 0, 10)      # ⚠️ el ruido rnorm(n,0,10) no está en el enunciado
+
+D <- as.numeric(rnorm(n) > 0)
+
+y <- D * y1 + (1 - D) * y0
+
+resumen(y, D, te)
+```
+
+### (e) Igual que (d), con TE ~ N(20, 10)
+
+**(R)** "Stata." (⚠️ misma discrepancia #5)
+
+```{r chunk5}
+set.seed(12345)
+
+y0 <- rnorm(n, 100, 30)
+
+te <- rnorm(n, 20, 10)
+y1 <- y0 + te + rnorm(n, 0, 10)      # ⚠️ ruido adicional (#5)
+
+D <- as.numeric(rnorm(n) > 0)
+
+y <- D * y1 + (1 - D) * y0
+
+resumen(y, D, te)
+```
+
+### (f) TE depende de W y W es la variable de asignación
+
+**(R)** "Stata." (⚠️ misma discrepancia #5)
+
+```{r chunk6}
+set.seed(12345)
+
+y0 <- rnorm(n, 100, 30)
+
+W <- as.numeric(rnorm(n) > 0)
+
+te <- ifelse(W == 1, rnorm(n, 20, 10), rnorm(n, 10, 10))
+
+y1 <- y0 + te + rnorm(n, 0, 10)      # ⚠️ ruido adicional (#5)
+
+y <- W * y1 + (1 - W) * y0
+
+resumen(y, W, te)
+```
+
+### (g) TE depende de W, pero el tratamiento se asigna al azar (como en el primer inciso)
+
+**(R)** "Stata." (⚠️ misma discrepancia #5)
+
+```{r chunk7}
+set.seed(12345)
+
+y0 <- rnorm(n, 100, 30)
+
+W <- as.numeric(rnorm(n) > 0)
+
+te <- ifelse(W == 1, rnorm(n, 20, 10), rnorm(n, 10, 10))
+
+y1 <- y0 + te + rnorm(n, 0, 10)      # ⚠️ ruido adicional (#5)
+
+D <- as.numeric(rnorm(n) > 0)
+
+y <- D * y1 + (1 - D) * y0
+
+resumen(y, D, te)
+```
+
+> ⚠️ **DISCREPANCIA #8.** En (d)–(g) el PDF no reporta resultados (solo "Stata."). Además, como R y Stata usan generadores de números aleatorios distintos, los números de R **no** coincidirán con los de Stata aunque la semilla sea la misma (12345).
+
+### (h) Conclusiones sobre la heterogeneidad del tratamiento
+
+**(R)** *(el PDF no contiene respuesta; solo repite el enunciado)*
+
+> ⚠️ **DISCREPANCIA #7.** Falta la respuesta. **Conclusión esperada (propuesta mía, no del PDF)**, usando la descomposición de (b); el ruido extra de `y1` no cambia las esperanzas:
+>
+> | Inciso | Asignación | ATE | ATT | ATU | Diferencia de medias ≈ | ¿Identifica el ATE? |
+> |---|---|---|---|---|---|---|
+> | (d) | aleatoria, TE = 20 | 20 | 20 | 20 | 20 | Sí |
+> | (e) | aleatoria, TE ~ N(20,10) | 20 | ≈20 | ≈20 | 20 | Sí (heterogeneidad independiente de D) |
+> | (f) | D = W, TE depende de W | 15 | 20 | 10 | ≈ 20 = ATE + (1−π)(ATT−ATU) = 15 + 0,5·10 | **No**: sesgada hacia ATT por heterogeneidad (el sesgo de selección es 0 porque Y⁰ no depende de W) |
+> | (g) | aleatoria, TE depende de W | 15 | ≈15 | ≈15 | 15 | Sí (la aleatorización rompe la relación entre D y el efecto) |
+>
+> Conclusión: la heterogeneidad del efecto **por sí sola** no sesga la diferencia de medias; el problema aparece cuando la **asignación está correlacionada con el efecto** (inciso f), en cuyo caso la diferencia de medias estima algo cercano al ATT y no al ATE. Con asignación aleatoria (g) vuelve a identificarse el ATE.
+
+---
+
+## Anexo — Script completo en R
+
+El script completo (Ejercicios 2 y 3) está en [`Datos/Trabajo Práctico N° 1.R`](Datos/Trabajo%20Práctico%20N°%201.R). El Ejercicio 1 se resolvió a mano en el PDF; el bloque de verificación de arriba es un agregado de este documento.

@@ -1,0 +1,443 @@
+---
+title: "Trabajo Práctico N° 3 — Diferencias en Diferencias"
+subtitle: "Microeconometría II · Maestría en Econometría UTDT"
+lang: es
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+---
+
+```{r setup, include=FALSE}
+# error = TRUE: si un chunk falla (por ejemplo, falta un paquete), el documento
+# igual se genera y muestra el error en ese lugar.
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, error = TRUE)
+```
+
+Este documento combina, para cada inciso: **(P)** el enunciado (`Trabajo Práctico N° 3 (P).pdf`), la **solución oficial** (`(S).pdf`, es el mismo enunciado con la solución del docente solo para el Ejercicio 1), **(R)** la resolución de `Trabajo Práctico N° 3 (R).pdf` (con las salidas de Stata) y el **código en R** (`Datos/Trabajo Práctico N° 3.R`, convertido desde el `.do`).
+
+> ⚠️ **DISCREPANCIA** marca todo lo que no coincide o falta entre enunciado, solución oficial, resolución y código.
+> ✅ marca lo que verifiqué y está bien.
+> 💡 marca una **propuesta mía** (no está en los PDFs) para completar lo que falta.
+> El código **no se ejecutó** (R no está disponible en esta máquina). Los números de Stata vienen de (R).pdf.
+> Las rutas de los chunks son relativas a la carpeta de este documento (`Datos/...`).
+
+---
+
+## Resumen de discrepancias
+
+| # | Dónde | Qué pasa | Gravedad |
+|---|-------|----------|----------|
+| 1 | Ej. 1, (S) | La solución oficial tiene **typos**: el último paso de θ̂₂ queda como Σ/(N(N−N₁)) y debe ser **Σ/(N−N₁)** (así lo escribe (R)); y en la covarianza aparece Σ y_i donde debe ser Σ Δy_i. | Baja |
+| 2 | Ej. 2 (b)–(d), (R) | Muestra las salidas pero **no interpreta** los estimadores, que es lo que pide el enunciado ("compute e interprete"). | Media |
+| 3 | Ej. 2 (b) vs. (c) | El coeficiente DiD es idéntico (−2,5195) pero el **error estándar cambia** (1,456 con MCO; 1,373 con efectos fijos) y el p-valor pasa de 0,088 a 0,071. (R) no lo comenta. | Baja |
+| 4 | Ej. 3 (a) y (b) | **Sin respuesta** en (R) ni en (S) (preguntas conceptuales: qué efecto estiman los autores y cuál es la estrategia de identificación). | Media |
+| 5 | Ej. 3 (c)–(e), (R) | Salidas sin interpretación. | Media |
+| 6 | Ej. 3 (e), (R) vs. enunciado/`.do` | El enunciado pide repetir (c) con covariables. (R) muestra solo la versión **con bootstrap** (`bs report`); el `.do` corre además la versión analítica y no está en el PDF. | Baja |
+| 7 | Ej. 3 (e), código R | `diff_did` devuelve la regresión y el coeficiente DiD, pero **no reproduce** las medias antes/después ajustadas por covariables que imprime `diff`. | Baja |
+| 8 | Ej. 4 (a) y (b) | **Sin respuesta** en (R) ni en (S). | Media |
+| 9 | Ej. 4 (d), (R) | Interpreta bien el coeficiente (+0,85 puntos), pero **no responde si se cumple tendencias paralelas**: solo explica cómo se podría chequear. El `.do` no hace ningún test ni gráfico previo, y hay 3 períodos previos (meses 1–3) para hacerlo. | Alta |
+| 10 | Ej. 4 (e), (R) | Concluye que "no hay grandes diferencias en la inferencia" pero no discute **qué error estándar corresponde**: el tratamiento varía por hospital, así que el robusto sin clusters (EE 0,0353) ignora la correlación dentro del hospital. | Media |
+| 11 | Ej. 4 (e), código R vs. Stata | La salida de Stata para `hc2` dice **"No. of clusters = 46"** (HC2 por hospital). El R usa `vcovHC(type = "HC2")` a nivel observación, que **no es lo mismo**. Agrego una versión por clusters. | Media |
+| 12 | Ej. 4 (e), `.do` | `vce(bootstrap)` con 50 réplicas y **sin `set seed`** en el `.do`: no reproducible. | Baja |
+| 13 | Ej. 4 (c), `.do` | `didregress (satis i.treated i.post) (procedure)` incluye `treated` y `post` como covariables, pero son **colineales con los efectos fijos de grupo y tiempo** (redundantes); la nota "adjusted for covariates" es engañosa. | Baja |
+| 14 | Enunciado (P), Ej. 4 | Typo: dice "con el comando `didregress` o incluyendo efectos fijos por individuo ... con el comando `didregress`"; el segundo debe ser **`xtdidregress`**. | Baja |
+
+---
+
+## Ejercicio 1 — Evaluación de impacto con DiD
+
+**(P)** Panel de dos períodos. En t = 1 nadie está en el programa; en t = 2 algunos reciben el programa. Con el modelo
+
+$$y_{it}=\theta_1+\theta_2\,d2_t+\delta_1\,prog_{it}+c_i+u_{it},\qquad E(u_{it}\mid prog_{i2},c_i)=0,$$
+
+y usando primeras diferencias, mostrar que $\hat\theta_2=\overline{\Delta y_c}$ y $\hat\delta_1=\overline{\Delta y_t}-\overline{\Delta y_c}$, donde $\overline{\Delta y_c}$ es el cambio promedio de y del grupo con $prog_{i2}=0$ y $\overline{\Delta y_t}$ el del grupo con $prog_{i2}=1$.
+
+**(S)/(R)** Ambas parten de:
+
+- t = 1: $y_{i1}=\theta_1+c_i+u_{i1}$ (porque $d2_1=0$ y $prog_{i1}=0$).
+- t = 2: $y_{i2}=\theta_1+\theta_2+\delta_1 prog_{i2}+c_i+u_{i2}$.
+- Primeras diferencias: $\Delta y_i=\theta_2+\delta_1\,prog_{i2}+\Delta u_i$ (el efecto fijo $c_i$ se cancela).
+- Los estimadores de MCO son $\hat\delta_1=\dfrac{Cov(prog_{i2},\Delta y_i)}{Var(prog_{i2})}$ y $\hat\theta_2=\overline{\Delta y}-\hat\delta_1\,\overline{prog_{i2}}$.
+
+Con $N_1$ = cantidad de tratados:
+
+$$Cov(prog_{i2},\Delta y_i)=\Big(1-\tfrac{N_1}{N}\Big)N_1\big(\overline{\Delta y_t}-\overline{\Delta y_c}\big),\qquad Var(prog_{i2})=N_1\Big(1-\tfrac{N_1}{N}\Big)$$
+
+$$\Rightarrow\ \hat\delta_1=\overline{\Delta y_t}-\overline{\Delta y_c},\qquad \hat\theta_2=\overline{\Delta y}-\hat\delta_1\tfrac{N_1}{N}=\frac{\sum_{prog_{i2}=0}\Delta y_i}{N-N_1}=\overline{\Delta y_c}.$$
+
+> ✅ **Verificado:** la algebra de (R) es correcta paso a paso (covarianza, varianza, $\hat\delta_1$ y $\hat\theta_2$) y llega al resultado pedido.
+>
+> ⚠️ **DISCREPANCIA #1 (typos en la solución oficial (S)).** En el último paso de $\hat\theta_2$, (S) escribe $\frac{N\sum_{prog=0}\Delta y_i}{N(N-N_1)}=\frac{\sum_{prog=0}\Delta y_i}{N(N-N_1)}$, que no es $\overline{\Delta y_c}$: al simplificar la N queda $\frac{\sum_{prog=0}\Delta y_i}{N-N_1}$, como lo escribe (R). Además, en una línea de la covarianza (S) pone $\sum_{prog_{i2}=1}y_i$ donde debe ser $\sum_{prog_{i2}=1}\Delta y_i$.
+
+```{r ej1-verificacion}
+# AGREGADO (no está en el .R original): verificación numérica del resultado.
+# Con datos simulados de dos períodos, la regresión de Delta y sobre prog da:
+#   delta1 = media(Delta y | prog = 1) - media(Delta y | prog = 0)
+#   theta2 = media(Delta y | prog = 0)
+set.seed(1)
+N    <- 500
+prog <- rbinom(N, 1, 0.4)
+dy   <- 2 + 1.5 * prog + rnorm(N)       # Delta y_i
+fit  <- lm(dy ~ prog)
+
+all.equal(coef(fit)[["prog"]], mean(dy[prog == 1]) - mean(dy[prog == 0]))   # TRUE
+all.equal(coef(fit)[["(Intercept)"]], mean(dy[prog == 0]))                  # TRUE
+```
+
+---
+
+## Ejercicio 2 — DiD simple (Panel101)
+
+Funciones auxiliares (equivalentes a `regress`, `xtreg` y al paquete `diff` de Stata):
+
+```{r helpers}
+library(haven)
+library(fixest)
+library(sandwich)
+library(lmtest)
+
+set.seed(12345)
+
+leer <- function(archivo) as.data.frame(zap_labels(read_dta(archivo)))
+
+# Diferencias en diferencias simple (equivalente a "diff"): tabla de medias y estimador
+# per: variable de período (0/1); tr: variable de tratamiento (0/1)
+diff_did <- function(d, y, per, tr, cov = NULL) {
+  f <- reformulate(c(sprintf("%s * %s", per, tr), cov), response = y)
+  m <- lm(f, data = d)
+  coefs <- summary(m)$coefficients
+  fila <- paste0(per, ":", tr)
+  list(modelo = m, did = coefs[fila, ], tabla = coefs)
+}
+
+# Bootstrap (reps = 50, como "diff, bs") del estimador DiD
+diff_boot <- function(d, y, per, tr, cov = NULL, reps = 50) {
+  fila <- paste0(per, ":", tr)
+  est <- function(dd) coef(lm(reformulate(c(sprintf("%s * %s", per, tr), cov), response = y),
+                              data = dd))[fila]
+  b <- replicate(reps, est(d[sample(nrow(d), replace = TRUE), ]))
+  c(estimador = unname(est(d)), ee_bootstrap = sd(b))
+}
+```
+
+### (a) Variables de resultado, tiempo y tratamiento
+
+**(P)** Abrir `Panel101.dta` y generar $Y=y/10^9$, $time=\mathbb{1}\{year\ge1994\}$ y $treated=\mathbb{1}\{country>4\}$ (países 5 a 7 tratados; tratamiento en 1994).
+
+**(R)** "Stata." (sin salida)
+
+> ✅ El código crea las tres variables tal como pide el enunciado.
+
+```{r ej2-a}
+panel <- leer("Datos/Panel101.dta")
+str(panel)
+if (is.character(panel$country)) panel$country <- as.integer(factor(panel$country))
+
+panel$Y <- panel$y / 1000000000
+panel$time <- as.numeric(panel$year >= 1994 & !is.na(panel$year))
+panel$treated <- as.numeric(panel$country > 4 & !is.na(panel$country))
+panel$did <- panel$time * panel$treated
+```
+
+### (b) DiD con regresión lineal
+
+**(R)** Salida de `regress Y time treated did` (N = 70, R² = 0,0827):
+
+| Variable | Coef. | EE | t | P>\|t\| |
+|---|---|---|---|---|
+| time | 2,289455 | 0,9529637 | 2,40 | 0,019 |
+| treated | 1,77597 | 1,127562 | 1,58 | 0,120 |
+| did | **−2,519512** | 1,455676 | −1,73 | 0,088 |
+| _cons | 0,358144 | 0,7381625 | 0,49 | 0,629 |
+
+> ⚠️ **DISCREPANCIA #2.** (R) no interpreta. 💡 **Interpretación sugerida (mía):** `_cons` (0,358) es el valor medio de Y de los países de control antes de 1994; `time` (2,29) es el cambio en el grupo de control; `treated` (1,78) es la diferencia inicial entre tratados y controles (no significativa); `did` (−2,52) es el efecto del tratamiento: después de 1994, Y de los países tratados evolucionó 2,52 (en miles de millones) **por debajo** del de los controles. Es significativo solo al 10% (p = 0,088).
+
+```{r ej2-b}
+print(summary(lm(Y ~ time + treated + did, data = panel)))
+```
+
+### (c) DiD con efectos fijos
+
+**(R)** Salida de `xtreg Y time treated did, fe` (N = 70, 7 países, R² within = 0,0968):
+
+| Variable | Coef. | EE | t | P>\|t\| |
+|---|---|---|---|---|
+| time | 2,289455 | 0,8986787 | 2,55 | 0,013 |
+| treated | 0 (omitida) | | | |
+| did | **−2,519512** | 1,372754 | −1,84 | 0,071 |
+| _cons | 1,119274 | 0,5262124 | 2,13 | 0,037 |
+
+> ⚠️ **DISCREPANCIA #2 (sin interpretación) y #3.** El coeficiente DiD es **idéntico** al de MCO (−2,5195); lo que cambia es el error estándar (1,373 vs 1,456) y el p-valor (0,071 vs 0,088), porque el efecto fijo por país absorbe la variación entre países. `treated` se omite por ser constante dentro de cada país (colineal con el efecto fijo). 💡 Sigue siendo significativo solo al 10%. El `.do` corre además `xtreg Y time##treated, fe`, que da el mismo estimador; (R) no lo muestra.
+>
+> ✅ Nota sobre el código: `fixest` con `vcov = "iid"` debería dar el mismo error estándar que `xtreg, fe`; conviene verificarlo contra 1,372754 al correrlo.
+
+```{r ej2-c}
+# Efectos fijos por país (treated es colineal con los efectos fijos y se omite)
+print(summary(feols(Y ~ time + treated + did | country, data = panel, vcov = "iid")))
+print(summary(feols(Y ~ time * treated | country, data = panel, vcov = "iid")))
+```
+
+### (d) DiD con el paquete `diff`
+
+**(R)** Salida de `diff Y, period(time) treated(treated)` (N = 70):
+
+| | Control | Tratados | Dif. (T−C) | EE | t | P>\|t\| |
+|---|---|---|---|---|---|---|
+| Antes | 0,358 | 2,134 | 1,776 | 1,128 | 1,58 | 0,120 |
+| Después | 2,648 | 1,904 | −0,744 | 0,921 | 0,81 | 0,422 |
+| **Diff-in-Diff** | | | **−2,520** | 1,456 | 1,73 | 0,088* |
+
+Celdas: control 16 antes / 24 después; tratados 12 antes / 18 después.
+
+> ✅ **Verificado:** coincide con (b) (mismo coeficiente y error estándar) y las medias son consistentes: (1,904 − 2,134) − (2,648 − 0,358) = −0,230 − 2,290 = −2,520. Las celdas también cuadran (4 controles × 4 años antes de 1994 = 16; 4 × 6 = 24; 3 tratados × 4 = 12; 3 × 6 = 18).
+>
+> ⚠️ **DISCREPANCIA #2.** Sin interpretación. 💡 Lectura: antes de 1994 los tratados tenían Y 1,78 mayor (no significativo); después pasan a tener 0,74 **menos** (tampoco significativo); la diferencia entre ambas brechas (−2,52) es el efecto DiD.
+
+```{r ej2-d}
+r <- diff_did(panel, "Y", "time", "treated")
+print(round(r$tabla, 4))
+cat("Diferencia en diferencias (DiD):\n"); print(round(r$did, 4))
+```
+
+---
+
+## Ejercicio 3 — Card & Krueger (1994)
+
+**(P)** Basado en *Minimum Wages and Employment: A Case Study of the Fast-Food Industry in New Jersey and Pennsylvania*.
+
+### (a) ¿Qué efecto intentan estimar los autores?
+
+**(R)** *(sin respuesta, el inciso está en blanco)*  **(S)** *(sin solución)*
+
+> ⚠️ **DISCREPANCIA #4.** 💡 **Respuesta sugerida (mía, basada en el paper, no en los PDFs):** el efecto de un **aumento del salario mínimo** sobre el **empleo** en restaurantes de comida rápida. New Jersey subió su salario mínimo en abril de 1992 (de 4,25 a 5,05 dólares por hora) y Pennsylvania no.
+
+### (b) ¿Cuál es la estrategia de identificación?
+
+**(R)** *(sin respuesta)*  **(S)** *(sin solución)*
+
+> ⚠️ **DISCREPANCIA #4.** 💡 **Respuesta sugerida (mía):** diferencias en diferencias. El grupo de tratamiento son los restaurantes de New Jersey y el de control los del este de Pennsylvania; se compara el cambio del empleo (fte, empleo equivalente a tiempo completo) entre antes y después del aumento. Supuesto clave: **tendencias paralelas** (sin el aumento, el empleo habría evolucionado igual en ambos estados).
+
+### (c) DiD con `diff`
+
+**(R)** Salida de `diff fte, period(t) treated(treated)` (N = 801):
+
+| | Control | Tratados | Dif. (T−C) | EE | t | P>\|t\| |
+|---|---|---|---|---|---|---|
+| Antes | 19,949 | 17,065 | −2,884 | 1,135 | −2,54 | 0,011** |
+| Después | 17,542 | 17,573 | 0,030 | 1,143 | 0,03 | 0,979 |
+| **Diff-in-Diff** | | | **2,914** | 1,611 | 1,81 | 0,071* |
+
+Celdas: control 78 antes / 77 después; tratados 326 / 320.
+
+> ✅ **Verificado:** (17,573 − 17,065) − (17,542 − 19,949) = 0,508 + 2,407 = 2,915 ≈ 2,914 (redondeo).
+>
+> ⚠️ **DISCREPANCIA #5.** Sin interpretación. 💡 Lectura: antes del aumento los restaurantes de NJ tenían **menos** empleo que los de PA (−2,88, significativo); después la brecha desaparece (0,03). El efecto DiD es **positivo** (+2,9 empleados equivalentes), significativo al 10% (p = 0,071): no hay evidencia de que el aumento del salario mínimo **redujera** el empleo, lo contrario de la predicción del modelo competitivo.
+
+```{r ej3-c}
+ck <- leer("Datos/CardKrueger1994.dta")
+str(ck)
+
+for (g in sort(unique(ck$treated))) {
+  cat("\ntreated =", g, "\n")
+  print(summary(ck[ck$treated == g, ]))
+}
+print(aggregate(fte ~ treated + t, data = ck,
+                FUN = function(x) c(n = length(x), media = mean(x), sd = sd(x))))
+
+r <- diff_did(ck, "fte", "t", "treated")
+print(round(r$tabla, 4))
+cat("Diferencia en diferencias (DiD):\n"); print(round(r$did, 4))
+```
+
+### (d) Repetir (c) con errores estándar bootstrap
+
+**(R)** Salida de `diff ..., bs`: DiD = **2,914**, EE bootstrap **1,620**, t = 1,80, p = 0,072. (Antes: Dif. −2,884, EE 1,329; después: 0,030, EE 1,080.)
+
+> ✅ El estimador no cambia (2,914) y el error estándar casi tampoco (1,620 vs 1,611 analítico): la inferencia es la misma. ⚠️ #5 (sin interpretación). El R usa 50 réplicas (el valor por defecto de `diff, bs`; lo supongo, no lo verifiqué), así que el EE no coincidirá exactamente con Stata.
+
+```{r ej3-d}
+print(round(diff_boot(ck, "fte", "t", "treated"), 4))
+```
+
+### (e) Repetir (c) con la cadena de restaurantes como covariables
+
+**(R)** Salida de `diff ..., cov(bk kfc roys) bs report` (N = 801, R² = 0,19):
+
+| Covariable | Coef. | EE | z | P>\|z\| |
+|---|---|---|---|---|
+| bk | 0,917 | 1,060 | 0,865 | 0,387 |
+| kfc | −9,205 | 0,961 | −9,575 | 0,000 |
+| roys | −0,897 | 1,136 | −0,790 | 0,430 |
+
+| | Control | Tratados | Dif. (T−C) | EE (bootstrap) | t | P>\|t\| |
+|---|---|---|---|---|---|---|
+| Antes | 21,161 | 18,837 | −2,324 | 1,276 | −1,82 | 0,069* |
+| Después | 18,758 | 19,369 | 0,611 | 0,946 | 0,65 | 0,518 |
+| **Diff-in-Diff** | | | **2,935** | 1,563 | 1,88 | 0,060* |
+
+> ⚠️ **DISCREPANCIA #5 (sin interpretación).** 💡 El efecto apenas cambia al controlar por cadena (2,935 vs 2,914) y gana un poco de significatividad (p = 0,060). KFC tiene un empleo medio muy inferior (−9,2) respecto de la categoría omitida (Wendy's).
+>
+> ⚠️ **DISCREPANCIA #6.** El enunciado pide repetir (c) con covariables; (R) muestra solo la versión **con bootstrap**. El `.do` también corre la versión analítica (`diff ..., cov(...) report`), que no está en el PDF.
+>
+> ⚠️ **DISCREPANCIA #7 (código).** `diff_did` imprime la regresión y el coeficiente DiD (que coincide con `diff`), pero no las medias antes/después ajustadas por covariables que muestra `diff` (21,161; 18,837; etc.).
+
+```{r ej3-e}
+cov <- c("bk", "kfc", "roys")
+r <- diff_did(ck, "fte", "t", "treated", cov)
+print(round(r$tabla, 4))
+cat("Diferencia en diferencias (DiD) con covariables:\n"); print(round(r$did, 4))
+
+print(round(diff_boot(ck, "fte", "t", "treated", cov), 4))
+```
+
+---
+
+## Ejercicio 4 — `didregress`
+
+**(P)** Hasta ahora: $Y_{it}=\beta_0+\beta_1D_{it}+\beta_2T_{it}+\beta_3(D\times T)_{it}+z_{it}\theta+u_{it}$ (con efectos fijos si hay panel). Stata 17 agrega comandos para estimar $Y_{ist}=\gamma_s+\gamma_t+z_{ist}\beta+\delta D_{st}+u_{ist}$.
+
+> ⚠️ **DISCREPANCIA #14 (enunciado).** El texto dice "con el comando `didregress` o incluyendo efectos fijos por individuo en el caso de datos longitudinales con el comando `didregress`". El segundo debe ser **`xtdidregress`**.
+
+### (a) ¿En qué difieren estos comandos del setup usual de DiD?
+
+**(R)** *(sin respuesta)*  **(S)** *(sin solución)*
+
+> ⚠️ **DISCREPANCIA #8.** 💡 **Respuesta sugerida (mía):** `didregress` / `xtdidregress` estiman un modelo con **efectos fijos de grupo ($\gamma_s$) y de tiempo ($\gamma_t$)** y una única variable de tratamiento $D_{st}$ que **varía por grupo y período** (en vez de las dummies $D$, $T$ y su interacción del setup usual). Soportan que el tratamiento empiece en momentos distintos para distintos grupos, calculan por defecto errores estándar **clusterizados por grupo** y traen herramientas para evaluar tendencias paralelas. `didregress` es para cortes transversales repetidos y `xtdidregress` para paneles.
+
+### (b) ¿Se pueden replicar las regresiones de los ejercicios anteriores?
+
+**(R)** *(sin respuesta)*  **(S)** *(sin solución)*
+
+> ⚠️ **DISCREPANCIA #8.** 💡 **Sugerencia (mía):** sí, el Ejercicio 2 se replica con grupo = país y tiempo = año, y la variable de tratamiento `did`. En Card & Krueger hay solo dos grupos (NJ y PA), así que los errores clusterizados por grupo no serían confiables.
+
+### (c) Evaluar el impacto del nuevo procedimiento de admisión sobre la satisfacción
+
+**(P)** 46 hospitales, datos mensuales de enero a julio; 18 implementaron el nuevo procedimiento en abril. `satis` va de 0 a 10; `procedure` = 1 si el paciente ingresó con el nuevo procedimiento después de marzo.
+
+**(R)** Salida de `didregress (satis i.treated i.post) (procedure), group(hospital) time(month)`:
+
+| | Control | Tratamiento |
+|---|---|---|
+| Hospitales | 28 | 18 |
+| Tiempo (mínimo / máximo) | 1 / 1 | 4 / 4 |
+
+N = 7.368 observaciones, corte transversal repetido, EE ajustados por 46 clusters (hospital):
+
+| ATET | Coef. | EE robusto | t | P>\|t\| | IC 95% |
+|---|---|---|---|---|---|
+| procedure (New vs Old) | **0,8479879** | 0,0321121 | 26,41 | 0,000 | [0,7833108; 0,912665] |
+
+> ✅ **Verificado:** 28 + 18 = 46 hospitales, como dice el enunciado; el tratamiento empieza en el mes 4 (abril).
+>
+> ⚠️ **DISCREPANCIA #13.** `treated` y `post` entran como covariables, pero son colineales con los efectos fijos de hospital y de mes (el efecto de grupo y de tiempo ya los absorbe); no aportan nada, y la nota de Stata "adjusted for covariates, group effects, and time effects" puede confundir. El código R las incluye igual para replicar el `.do`.
+
+```{r ej4-c}
+hosp <- leer("Datos/hospdd.dta")
+str(hosp)
+
+print(summary(hosp))
+print(table(hosp$procedure))
+print(table(hosp$month, hosp$procedure))
+print(table(hosp$hospital, hosp$procedure))
+
+hosp$treated <- ave(hosp$procedure, hosp$hospital, FUN = max)
+hosp$post <- as.numeric(hosp$month >= 4 & !is.na(hosp$procedure))
+
+print(table(hosp$treated))
+print(table(hosp$procedure, hosp$treated))
+
+# didregress (satis i.treated i.post) (procedure), group(hospital) time(month)
+# = regresión con efectos fijos de hospital y de mes; EE clusterizados por hospital
+# (treated y post son colineales con los efectos fijos y se omiten)
+print(summary(feols(satis ~ procedure + treated + post | hospital + month,
+                    data = hosp, cluster = ~hospital)))
+```
+
+### (d) Interpretación del coeficiente y tendencias paralelas
+
+**(R)** El coeficiente (0,8479879) es el efecto promedio del nuevo procedimiento sobre la satisfacción de los pacientes en los hospitales que lo implementaron respecto de los que no: la satisfacción aumenta aproximadamente **0,85 puntos** en la escala de 0 a 10. Sobre tendencias paralelas: explica que el supuesto implica que, sin el tratamiento, las tendencias habrían sido similares, que no se puede evaluar directamente con el coeficiente y que se podrían graficar las tendencias previas (enero a marzo) o usar pruebas formales; si divergen antes de abril, la interpretación causal puede estar sesgada.
+
+> ✅ **Verificado:** la interpretación del coeficiente es correcta (0,85 puntos de aumento promedio sobre los tratados, ATET).
+>
+> ⚠️ **DISCREPANCIA #9.** La pregunta es "**¿se cumple** el supuesto de tendencias paralelas?" y (R) no responde: solo describe cómo se chequearía. Tampoco lo hace el `.do` (no hay gráfico de tendencias ni test), aunque hay **tres períodos previos** (meses 1 a 3) con los que se puede hacer. 💡 El código de abajo (agregado) estima un event study con el mes 3 como base.
+
+```{r ej4-d-pretrends}
+# AGREGADO (no está en el .do ni en el .R original): chequeo de tendencias paralelas.
+# Event study: interacción entre ser hospital tratado y cada mes (mes 3 = base).
+# Si los coeficientes de los meses 1 y 2 (antes del tratamiento) son cercanos a 0,
+# es consistente con tendencias paralelas.
+es <- feols(satis ~ i(month, treated, ref = 3) | hospital + month,
+            data = hosp, cluster = ~hospital)
+print(summary(es))
+
+# Test conjunto de que los efectos previos (meses 1 y 2) son cero
+print(wald(es, "month::1:treated|month::2:treated"))
+
+# Gráfico de tendencias medias por grupo
+medias <- aggregate(satis ~ month + treated, data = hosp, FUN = mean)
+plot(NULL, xlim = range(medias$month), ylim = range(medias$satis),
+     xlab = "Mes", ylab = "Satisfacción media")
+for (g in 0:1) {
+  with(medias[medias$treated == g, ], lines(month, satis, type = "b", col = g + 1))
+}
+abline(v = 3.5, lty = 2)
+legend("topleft", c("Control", "Tratados"), col = 1:2, lty = 1, bty = "n")
+```
+
+### (e) Errores estándar y opciones pre-configuradas
+
+**(R)** Reporta la misma estimación (ATET = 0,8479879) con cuatro errores estándar:
+
+| Opción | EE | Estadístico | P>\|t\| (o z) | IC 95% |
+|---|---|---|---|---|
+| Por defecto (cluster por hospital, 46 clusters) | 0,0321121 | t = 26,41 | 0,000 | [0,7833; 0,9127] |
+| `vce(robust)` | 0,0353158 | z = 24,01 | 0,000 | [0,7788; 0,9172] |
+| `vce(hc2)` (46 clusters) | 0,0325552 | t = 26,05 | 0,000 | [0,7820; 0,9140] |
+| `vce(bootstrap)` (50 réplicas, 46 clusters) | 0,0284533 | z = 29,80 | 0,000 | [0,7922; 0,9038] |
+
+**(R)** "Por lo tanto, se puede observar que no hay grandes diferencias en la inferencia, ya que el ATET es estadísticamente significativo al 1%."
+
+> ✅ **Verificado:** la conclusión cualitativa es correcta: con los cuatro EE el efecto es significativo al 1% (|t| > 24) y los EE varían entre 0,0285 y 0,0353.
+>
+> ⚠️ **DISCREPANCIA #10.** (R) no discute **cuál corresponde usar**. El tratamiento varía **por hospital**, de modo que lo apropiado es agrupar por hospital (la opción por defecto, HC2 y bootstrap por clusters). `vce(robust)` ignora la correlación dentro del hospital (en la salida no aparece el número de clusters). Con solo 18 hospitales tratados la inferencia con clusters también merece cautela (💡 por ejemplo, un wild cluster bootstrap).
+>
+> ⚠️ **DISCREPANCIA #12.** El bootstrap usa 50 réplicas y el `.do` no fija semilla: el EE (0,0285) no se reproduce exactamente.
+>
+> ⚠️ **DISCREPANCIA #11 (código).** La salida de Stata para `vce(hc2)` indica **"No. of clusters = 46"**, es decir HC2 **clusterizado por hospital**. El código R usa `vcovHC(type = "HC2")`, que es HC2 a nivel observación y no debería coincidir con 0,0325552. El segundo chunk (agregado) calcula una versión clusterizada; es una **aproximación**, puede no coincidir exactamente con Stata.
+
+```{r ej4-e}
+m <- lm(satis ~ procedure + factor(hospital) + factor(month), data = hosp)
+
+# vce(robust): HC1
+print(coeftest(m, vcov = vcovHC(m, type = "HC1"))["procedure", , drop = FALSE])
+
+# vce(hc2)  (a nivel observación; ver discrepancia #11)
+print(coeftest(m, vcov = vcovHC(m, type = "HC2"))["procedure", , drop = FALSE])
+
+# vce(bootstrap): bootstrap por clusters (hospitales), 50 repeticiones
+hosp_ids <- unique(hosp$hospital)
+boot_coef <- replicate(50, {
+  s <- sample(hosp_ids, replace = TRUE)
+  dd <- do.call(rbind, lapply(seq_along(s), function(i) {
+    x <- hosp[hosp$hospital == s[i], ]
+    x$hospital <- i
+    x
+  }))
+  coef(feols(satis ~ procedure | hospital + month, data = dd))["procedure"]
+})
+cat("procedure: coef =", coef(m)["procedure"], " EE bootstrap =", sd(boot_coef), "\n")
+```
+
+```{r ej4-e-hc2-cluster}
+# AGREGADO: HC2 clusterizado por hospital (más cercano a lo que reporta Stata)
+G <- length(unique(hosp$hospital))
+print(coeftest(m, vcov = vcovCL(m, cluster = hosp$hospital, type = "HC2"),
+               df = G - 1)["procedure", , drop = FALSE])
+```
+
+---
+
+## Anexo — Script completo en R
+
+El script completo está en [`Datos/Trabajo Práctico N° 3.R`](Datos/Trabajo%20Práctico%20N°%203.R). Los chunks de arriba son el mismo código dividido por inciso, con estas diferencias: las rutas de los datos (`Datos/...`, relativas a este documento) y los bloques marcados "AGREGADO" (verificación numérica del Ejercicio 1, event study y gráfico de tendencias del Ejercicio 4 (d), y HC2 clusterizado del Ejercicio 4 (e)).

@@ -1,0 +1,657 @@
+---
+title: "Trabajo Práctico N° 2: Modelos de Datos de Panel Lineales"
+subtitle: "Econometría de Datos de Panel — Maestría en Economía y Econometría, UTDT"
+author: "Victor Funes"
+date: "2022"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = TRUE, message = FALSE, warning = FALSE)
+library(haven)     # lectura de .dta
+library(plm)       # efectos fijos / aleatorios, Hausman
+library(sandwich)  # errores estándar robustos / clusterizados
+library(lmtest)    # coeftest
+library(knitr)
+
+# Diferencia máxima absoluta entre lo estimado en R y lo reportado en el PDF
+dif <- function(est, pdf) signif(max(abs(unname(est) - pdf)), 3)
+```
+
+> **Cómo leer este documento.** Cada inciso reúne (i) el enunciado de *Trabajo Práctico N° 2 (P).pdf*, (ii) la respuesta del PDF de resolución *Trabajo Práctico N° 2 (R).pdf*, (iii) cuando corresponde, la respuesta del solucionario *Trabajo Práctico N° 2 (S).pdf*, y (iv) una **replicación en R** (todo el documento usa **sólo R**; el archivo `Datos/Trabajo Práctico N° 2.do` de Stata sirvió de guía para la lógica de cada cálculo).
+> Los bloques `{r}` se ejecutan al tejer, leyendo los `.dta` desde `Datos/`. En cada replicación se reporta la **diferencia máxima** contra los números del PDF de resolución (`dif`).
+> Las inconsistencias entre enunciado, código, resolución y solucionario están marcadas con **⚠️ DISCREPANCIA**. Al final hay una tabla resumen.
+
+```{r datos}
+# Funciones auxiliares
+lag1 <- function(x, g) ave(x, g, FUN = function(z) c(NA, head(z, -1)))   # rezago dentro del grupo
+d1   <- function(x, g) x - lag1(x, g)                                    # primera diferencia (operador D.)
+```
+
+---
+
+# Ejercicio 1
+
+**Enunciado.** Utilice nuevamente la base de datos *"cornwell.dta"* provista para el Problem Set 1. Considere el siguiente modelo de regresión:
+
+$$\ln crmrte_{it}=\beta_0+\beta_1\ln prbarr_{it}+\beta_2\ln prbconv_{it}+\beta_3\ln prbpris_{it}+\beta_4\ln avgsen_{it}+\beta_5\ln polpc_{it}+\sum_{\tau=82}^{87}\beta_\tau\cdot I\{t=\tau\}+\mu_i+\varepsilon_{it}$$
+
+```{r ej1-datos}
+cw  <- as.data.frame(read_dta("Datos/cornwell.dta"))
+cw  <- cw[order(cw$county, cw$year), ]                      # equivale a xtset county year
+rhs <- c("lprbarr", "lprbconv", "lprbpris", "lavgsen", "lpolpc", paste0("d", 82:87))
+c(N = nrow(cw), condados = length(unique(cw$county)), anios = length(unique(cw$year)))
+```
+
+## (a) Medias individuales
+
+**Enunciado.** Utilizando el comando *egen* de STATA, construya las medias individuales de las variables del modelo.
+
+**Resolución (PDF R):** sólo dice "Stata." (resaltado); no hay salida.
+
+> **⚠️ DISCREPANCIA 1.** El enunciado habla de `egen` (comando de Stata), pero este documento usa sólo R; el equivalente es `ave()`. El PDF de resolución no muestra ninguna salida para este inciso (sólo dice "Stata."), así que no hay valores para contrastar.
+
+**Replicación en R** (equivalente a `by county: egen mean_x = mean(x)`):
+
+```{r ej1-a}
+vars <- c("lcrmrte", rhs)
+for (v in vars) cw[[paste0("mean_", v)]] <- ave(cw[[v]], cw$county, FUN = mean)
+head(cw[, c("county", "year", "lcrmrte", "mean_lcrmrte", "mean_lprbarr")], 8)
+```
+
+## (b) Transformación within y POLS
+
+**Enunciado.** Aplique la transformación *within* al modelo. Luego, estime el modelo transformado por POLS.
+
+**Resultado (PDF R):** N = 630; $R^2$ = 0,4342; Root MSE = 0,12823; coeficientes y errores estándar (`regress ..., noconstant`, SE no corregidos por grados de libertad):
+
+| Variable | Coef. | EE (PDF) |
+|---|---|---|
+| within_lprbarr | −0,3597944 | 0,0299699 |
+| within_lprbconv | −0,2858733 | 0,0196143 |
+| within_lprbpris | −0,1827812 | 0,0300086 |
+| within_lavgsen | −0,0044879 | 0,024449 |
+| within_lpolpc | 0,4241142 | 0,0243741 |
+| within_d82 … d87 | 0,0125802; −0,0792813; −0,1177281; −0,1119561; −0,0818268; −0,0404704 | 0,0199141; 0,0197277; 0,0199815; 0,0201954; 0,0198078; 0,0194497 |
+
+**Replicación en R:**
+
+```{r ej1-b}
+for (v in vars) cw[[paste0("within_", v)]] <- cw[[v]] - cw[[paste0("mean_", v)]]
+f_w <- reformulate(paste0("within_", rhs), "within_lcrmrte", intercept = FALSE)
+m_within <- lm(f_w, cw)
+summary(m_within)
+
+pdf_b  <- c(-.3597944, -.2858733, -.1827812, -.0044879, .4241142, .0125802, -.0792813, -.1177281, -.1119561, -.0818268, -.0404704)
+pdf_bse <- c(.0299699, .0196143, .0300086, .024449, .0243741, .0199141, .0197277, .0199815, .0201954, .0198078, .0194497)
+c(dif_coef = dif(coef(m_within), pdf_b), dif_ee = dif(coef(summary(m_within))[, 2], pdf_bse),
+  r2 = round(summary(m_within)$r.squared, 4))
+```
+
+## (c) Validez de los errores estándar
+
+**Enunciado.** Comente sobre la validez de los errores estándar del inciso previo.
+
+**Resolución (PDF R):** "Los errores estándar reportados tienden a ser pequeños comparados a los verdaderos. El problema se encuentra en que los grados de libertad de aplicar OLS al modelo transformado no coinciden con el denominador del estimador consistente para $\sigma_\varepsilon^2$. Por consiguiente, excepto que $T$ sea lo suficientemente grande, se necesita corregir este denominador."
+
+**Solucionario (S):** la estimación de la varianza en (b) es $\hat\sigma_\varepsilon^2 = RSS/(NT-K)$, pero un estimador consistente es $\hat\sigma^2_\varepsilon=\frac{1}{N(T-1)-K}\sum_i\sum_t\hat\varepsilon_{it}^2$. Por eso los errores estándar son chicos: los g.l. del modelo transformado no coinciden con el denominador correcto.
+
+**Replicación en R:** se verifica que el ajuste de g.l. explica exactamente la diferencia con FE.
+
+```{r ej1-c}
+N <- length(unique(cw$county)); NT <- nrow(cw); K <- length(rhs)
+gl_ols <- NT - K            # g.l. de la regresión sobre variables transformadas: 619
+gl_fe  <- N * (7 - 1) - K   # g.l. correctos: N(T-1)-K = 529
+c(gl_ols = gl_ols, gl_correctos = gl_fe)
+# EE corregidos = EE de lm() * sqrt(gl_ols / gl_fe)
+ee_corr <- coef(summary(m_within))[, 2] * sqrt(gl_ols / gl_fe)
+round(cbind(ee_within = coef(summary(m_within))[, 2], ee_corregido = ee_corr)[1:3, ], 4)
+```
+
+> Con la corrección, el EE de `lprbarr` pasa de 0,0300 a 0,0324, que es exactamente el de `xtreg, fe` (S: 0,0324). Esto confirma el comentario del PDF.
+
+## (d) Efectos fijos (`xtreg, fe`)
+
+**Enunciado.** Utilice el comando *xtreg* para estimar nuevamente el modelo usando efectos fijos.
+
+**Resultado (PDF R):** coeficientes idénticos a los de (b) y $R^2$ within = 0,4342; sigma_u = 0,43487416, sigma_e = 0,13871215, rho = 0,90765322; constante −1,604135. **Los errores estándar del PDF son robustos** ("Std. err. adjusted for 90 clusters in county"): p. ej. `lprbarr` 0,0594678; `lprbconv` 0,051522; `lprbpris` 0,0452811; constante 0,5102062.
+
+**Solucionario (S):** tabla con `lprbarr` −0,360 (EE **0,0324**), `lprbconv` −0,286 (0,0212), …, constante −1,604 (0,169).
+
+> **⚠️ DISCREPANCIA 2.** El PDF de resolución muestra la salida de `xtreg ..., fe` con errores estándar **clusterizados** (0,0595 para `lprbarr`), mientras que (i) el código `.do` entregado corre `xtreg lcrmrte vars, fe` **sin** `vce(cluster county)` y (ii) el solucionario (S) reporta los errores estándar **no robustos** (0,0324). Es decir, los EE del PDF de resolución no salen del código que lo acompaña. A continuación se replican ambos.
+
+**Replicación en R:**
+
+```{r ej1-d}
+f1  <- reformulate(rhs, "lcrmrte")
+fe1 <- plm(f1, cw, index = c("county", "year"), model = "within")
+G   <- length(unique(cw$county))
+
+# (i) EE habituales de xtreg, fe (= los de S)
+ee_fe <- sqrt(diag(vcov(fe1)))
+# (ii) EE clusterizados (= los del PDF R); Stata aplica además el factor G/(G-1)
+ee_fe_cl <- sqrt(diag(vcovHC(fe1, method = "arellano", type = "HC1", cluster = "group")) * G / (G - 1))
+
+round(cbind(coef = coef(fe1), ee_habitual = ee_fe, ee_cluster = ee_fe_cl), 4)
+c(constante = round(unname(within_intercept(fe1)), 6))
+
+pdf_cl <- c(.0594678, .051522, .0452811, .0333499, .0849052, .0160066, .0195639, .0217118, .0256583, .0236276, .0241765)
+c(dif_coef_vs_within = dif(coef(fe1), coef(m_within)),
+  dif_ee_cluster_vs_PDF = dif(ee_fe_cl, pdf_cl),
+  dif_ee_habitual_vs_S = dif(ee_fe[1], .0324))
+```
+
+## (e) Primeras diferencias
+
+**Enunciado.** Estime el modelo usando diferencias finitas de primer orden.
+
+**Resultado (PDF R):** N = 540; $R^2$ = 0,4326; Root MSE = 0,15431 (`regress D.lcrmrte D.(...), noconstant`).
+
+| Variable (D.) | Coef. | EE |
+|---|---|---|
+| lprbarr | −0,3274942 | 0,0299801 |
+| lprbconv | −0,2381066 | 0,0182341 |
+| lprbpris | −0,1650462 | 0,025969 |
+| lavgsen | −0,0217607 | 0,0220909 |
+| lpolpc | 0,3984264 | 0,026882 |
+| d82 … d87 | 0,0077134; −0,0844391; −0,1246632; −0,121561; −0,0863333; −0,0377932 | 0,0170579; 0,0234564; 0,0287464; 0,03315; 0,0366763; 0,0399728 |
+
+**Solucionario (S):** "no hay un comando nativo ... necesitamos construir las variables" (`gen dX = X − L1.X`) y estima por MCO sin constante; la tabla (S) coincide con la anterior.
+
+**Replicación en R:**
+
+```{r ej1-e}
+for (v in vars) cw[[paste0("D_", v)]] <- d1(cw[[v]], cw$county)
+f_fd <- reformulate(paste0("D_", rhs), "D_lcrmrte", intercept = FALSE)
+m_fd <- lm(f_fd, cw)       # lm descarta las observaciones con NA (primer año de cada condado)
+c(N = nobs(m_fd), R2 = round(summary(m_fd)$r.squared, 4))
+round(coef(summary(m_fd))[, 1:2], 4)
+
+pdf_fd  <- c(-.3274942, -.2381066, -.1650462, -.0217607, .3984264, .0077134, -.0844391, -.1246632, -.121561, -.0863333, -.0377932)
+pdf_fdse <- c(.0299801, .0182341, .025969, .0220909, .026882, .0170579, .0234564, .0287464, .03315, .0366763, .0399728)
+c(dif_coef = dif(coef(m_fd), pdf_fd), dif_ee = dif(coef(summary(m_fd))[, 2], pdf_fdse))
+```
+
+**Comparación POLS / FE / FD** (como la tabla de (S)):
+
+```{r ej1-tabla}
+m_pols1 <- lm(f1, cw)
+V_pols  <- vcovCL(m_pols1, cluster = cw$county, type = "HC1")
+tab1 <- data.frame(
+  POLS = coef(m_pols1)[rhs], `(EE cl.)` = sqrt(diag(V_pols))[rhs],
+  FE = coef(fe1)[rhs], `(EE)` = ee_fe[rhs],
+  FD = coef(m_fd), `(EE) ` = coef(summary(m_fd))[, 2], check.names = FALSE)
+rownames(tab1) <- rhs
+kable(round(tab1, 4))
+```
+
+---
+
+# Ejercicio 2
+
+**Enunciado.** Utilice la base de datos provista *"murder.dta"*. La base de datos es una muestra longitudinal de estados de EE.UU., para los años 1987, 1990 y 1993.
+
+```{r ej2-datos}
+mu <- as.data.frame(read_dta("Datos/murder.dta"))
+c(N = nrow(mu), estados = length(unique(mu$id)), anios = paste(sort(unique(mu$year)), collapse = ", "))
+```
+
+> **Nota de código.** La base **no viene ordenada por `id`** (el primer estado es `id = 2`, Alabama), sólo agrupada por estado con los años en orden creciente. Por eso aquí se ordena explícitamente por `id` y `year` antes de armar las matrices del inciso (f).
+
+```{r ej2-orden}
+mu <- mu[order(mu$id, mu$year), ]
+```
+
+## (a) POLS
+
+**Enunciado.** Estime por OLS el efecto de las ejecuciones ($x$) sobre la tasa de homicidios (*murder rates*, $m$) controlando por desempleo ($u$) y año:
+
+$$m_{i,t}=\alpha+\beta_x x_{i,t}+\beta_u u_{i,t}+\beta_{90}d_{90,t}+\beta_{93}d_{93,t}+\nu_{i,t}$$
+
+Note que se omitió la dummy temporal para el año 1987. Interprete los resultados.
+
+**Resultado (PDF R):** N = 153; $R^2$ = 0,0761; Root MSE = 8,9548; `exec` 0,1627547 (0,1939295); `unem` 1,390786 (0,4508653); `d90` 2,675335 (1,816934); `d93` 1,607317 (1,774768); constante −1,864393 (3,069517). *El PDF no incluye interpretación escrita.*
+
+**Solucionario (S):** "el coeficiente de ejecuciones no es estadísticamente significativo ... el signo es el opuesto al que, a priori, los defensores de la pena de muerte afirman ... la única [variable] significativa es el desempleo ($\hat\beta_u>0$) ... **las dummies temporales ($\hat\beta_{90}$ y $\hat\beta_{93}$) resultan estadísticamente significativas, lo cual indica evidencia a favor de la ausencia de efectos fijos temporales**."
+
+> **⚠️ DISCREPANCIA 3.** (i) El PDF de resolución (R) no interpreta los resultados, aunque el enunciado lo pide. (ii) La interpretación de (S) afirma que las dummies de 1990 y 1993 son significativas, pero **su propia tabla** reporta $t=1{,}47$ y $0{,}91$ (no significativas), igual que el PDF R (EE 1,82 y 1,77). Además, más adelante, en 2(d), (S) dice que las dummies "en este caso dan significativas, lo cual **no ocurría en el inciso anterior**", lo que contradice lo afirmado en 2(a). Por último, el razonamiento "significativas ⇒ ausencia de efectos fijos temporales" está invertido: dummies de año significativas indicarían *presencia* de efectos temporales agregados.
+
+**Replicación en R:**
+
+```{r ej2-a}
+f2 <- mrdrte ~ exec + unem + d90 + d93
+m2_pols <- lm(f2, mu)
+summary(m2_pols)
+
+pdf2a <- c(-1.864393, .1627547, 1.390786, 2.675335, 1.607317)
+c(dif_coef = dif(coef(m2_pols), pdf2a),
+  dif_ee = dif(coef(summary(m2_pols))[, 2], c(3.069517, .1939295, .4508653, 1.816934, 1.774768)),
+  R2 = round(summary(m2_pols)$r.squared, 4))
+```
+
+## (b) Importancia de los efectos temporales agregados
+
+**Enunciado.** ¿Por qué podría ser importante tener en consideración los efectos temporales agregados en el modelo?
+
+**Resolución (PDF R) y Solucionario (S)** (texto idéntico): "Podría ser importante si la tasa de homicidios es afectada por factores macroeconómicos externos que afectan a todos los estados de EE.UU. de la misma manera. Por lo tanto, si no incluimos estas variables, debemos suponer que cualquier cambio en la media de la tasa de homicidios en el tiempo se debe a las ejecuciones o a la tasa de desempleo y no a factores externos. Por otra parte, controlar por estas variables hace más factible que se cumpla el supuesto de ausencia de autocorrelación serial."
+
+## (c) Efectos fijos
+
+**Enunciado.** Ahora, considere la siguiente modificación en el modelo:
+
+$$m_{i,t}=\alpha+\beta_x x_{i,t}+\beta_u u_{i,t}+\beta_{90}d_{90,t}+\beta_{93}d_{93,t}+c_i+e_{i,t}$$
+
+donde $c_i$ es un efecto individual por estado. Estime la ecuación usando efectos fijos.
+
+**Resultado (PDF R) — `xtreg, fe`:** N = 153, 51 grupos, 3 obs. por grupo; $R^2$ within = 0,0734; `exec` −0,1383231 (0,1770059); `unem` 0,2213158 (0,2963756); `d90` 1,556215 (0,7453273); `d93` 1,733242 (0,7004381); constante 5,822104 (1,915611); sigma_u = 8,7527226; sigma_e = 3,5214244; rho = 0,86068589; F(50, 98) = 17,18 para $H_0$: todos $c_i=0$.
+
+**Solucionario (S):** estima además LSDV (dummies de estado): coeficientes iguales a los de FE salvo la constante (5,904 vs. 5,822), $R^2$ = 0,91 (LSDV) vs. 0,07 (FE within).
+
+**Replicación en R:**
+
+```{r ej2-c}
+fe2  <- plm(f2, mu, index = c("id", "year"), model = "within")
+lsdv <- lm(mrdrte ~ exec + unem + d90 + d93 + factor(id), mu)
+
+summary(fe2)
+coef(summary(lsdv))[1:5, 1:2]            # LSDV: constante y las 4 pendientes
+c(R2_LSDV = round(summary(lsdv)$r.squared, 3), R2_within_FE = round(summary(fe2)$r.squared[1], 4),
+  constante_FE_Stata = round(unname(within_intercept(fe2)), 4))
+
+pdf2c <- c(-.1383231, .2213158, 1.556215, 1.733242)
+c(dif_coef_FE = dif(coef(fe2), pdf2c),
+  dif_ee_FE = dif(coef(summary(fe2))[, 2], c(.1770059, .2963756, .7453273, .7004381)),
+  dif_LSDV_vs_FE = dif(coef(lsdv)[2:5], coef(fe2)))
+```
+
+> **Nota.** `plm` reporta el $R^2$ within (0,0734); las "constantes" de LSDV (5,9038, la del estado base) y de `xtreg, fe` (5,8221, la media de los efectos fijos) difieren, como señala (S). La constante 5,822 de Stata se obtiene en R con `within_intercept()`.
+
+> **⚠️ DISCREPANCIA 4 (código).** El `.do` escribe la dependiente como `mrdrt` en `regress mrdrt` (inciso a) y `xtreg mrdrt` (c y g), pero como `mrdrte` en la regresión LSDV; en Stata `mrdrt` funciona sólo por abreviatura automática de variables. En R se usa siempre `mrdrte`. El PDF de resolución no muestra la salida de LSDV (sólo FE); ésta sale únicamente en la tabla de (S).
+
+## (d) Primeras diferencias
+
+**Enunciado.** Repita la estimación del inciso previo usando diferencias finitas de primer orden.
+
+**Resultado (PDF R):** N = 102; $R^2$ = 0,0617; `cexec` −0,1150682 (0,1473871); `cunem` 0,1630854 (0,3079049); `cd90` 1,51099 (0,6608967); `cd93` 1,725263 (0,8533453).
+
+**Solucionario (S):** FE usa $m_{it}-\bar m_i=\dots$; FD usa $\Delta m_{it}=\beta_x\Delta x_{it}+\beta_u\Delta u_{it}+\beta_{90}\Delta d_{90}+\beta_{93}\Delta d_{93}+\Delta e_{it}$. Los coeficientes de FE y LSDV son iguales (salvo la constante); en FD "el coeficiente relevante es $\Delta$ Ejecuciones", no significativo, de signo negativo (opuesto a POLS). "Las dummies para el año 1990 y el año 1993 en este caso dan significativas, lo cual no ocurría en el inciso anterior."
+
+**Replicación en R:** la base trae las diferencias ya calculadas (`cmrdrte`, `cexec`, `cunem`); las dummies diferenciadas se construyen a mano (en 1990: $\Delta d_{90}=1$, $\Delta d_{93}=0$; en 1993: $\Delta d_{90}=-1$, $\Delta d_{93}=1$).
+
+```{r ej2-d}
+mu$cd90 <- ifelse(mu$year == 90, 1, ifelse(mu$year == 93, -1, NA))
+mu$cd93 <- ifelse(mu$year == 90, 0, ifelse(mu$year == 93, 1, NA))
+m2_fd <- lm(cmrdrte ~ 0 + cexec + cunem + cd90 + cd93, mu)
+c(N = nobs(m2_fd), R2 = round(summary(m2_fd)$r.squared, 4))
+round(coef(summary(m2_fd))[, 1:4], 4)
+
+# control: diferencias calculadas a mano coinciden con las de la base
+all.equal(d1(mu$mrdrte, mu$id), mu$cmrdrte, check.attributes = FALSE, tolerance = 1e-5)
+
+pdf2d <- c(-.1150682, .1630854, 1.51099, 1.725263)
+c(dif_coef = dif(coef(m2_fd), pdf2d),
+  dif_ee = dif(coef(summary(m2_fd))[, 2], c(.1473871, .3079049, .6608967, .8533453)))
+```
+
+Tabla comparativa LSDV / FE / FD (como en (S)):
+
+```{r ej2-d-tabla}
+tab2 <- rbind(
+  data.frame(Modelo = "LSDV", Var = names(coef(lsdv))[2:5], Coef = coef(lsdv)[2:5], EE = coef(summary(lsdv))[2:5, 2]),
+  data.frame(Modelo = "FE",   Var = names(coef(fe2)),       Coef = coef(fe2),       EE = coef(summary(fe2))[, 2]),
+  data.frame(Modelo = "FD",   Var = names(coef(m2_fd)),     Coef = coef(m2_fd),     EE = coef(summary(m2_fd))[, 2]))
+rownames(tab2) <- NULL
+kable(tab2, digits = 4)
+```
+
+## (e) Exogeneidad estricta
+
+**Enunciado.** Brinde un ejemplo bajo el cual la variable de ejecuciones no sería estrictamente exógena (condicional en $c_i$). *Observación.* Para obtener estimaciones consistentes, el modelo de efectos fijos asume exogeneidad estricta de las variables explicativas condicionadas en $c_i$.
+
+**Resolución (PDF R) y Solucionario (S)** (mismo texto): "Un ejemplo ... sería si los estados aumentan las ejecuciones futuras en respuesta a los *shocks* positivos actuales de la tasa de homicidios. Dado el tramo de tiempo relativamente corto de la base de datos, la retroalimentación ... puede no ser muy preocupante, ya que el proceso judicial en los casos de pena capital tiende a moverse lentamente. Por supuesto, si se acelerara debido a un aumento de la tasa de homicidios, eso podría violar la exogeneidad estricta. Con una serie temporal más larga, se podría añadir $x_{i,t+1}$ (e, incluso, valores de un futuro más lejano) y estimar la ecuación por FE, comprobando la significatividad estadística de la variable $x_{i,t+1}$. [Si resulta significativa] se tendría evidencia a favor de que no se cumple el supuesto de exogeneidad estricta."
+
+> **Nota.** Con sólo tres períodos (1987, 1990, 1993) el adelanto $x_{i,t+1}$ se puede agregar únicamente para dos de los tres años, perdiendo una observación por estado; el propio texto aclara que esto es práctico "con una serie temporal más larga". A modo de ilustración se muestra el test en R (con las limitaciones de potencia que ello implica):
+
+```{r ej2-e}
+mu$exec_lead <- ave(mu$exec, mu$id, FUN = function(z) c(tail(z, -1), NA))
+fe_lead <- plm(mrdrte ~ exec + unem + d90 + d93 + exec_lead, mu[!is.na(mu$exec_lead), ], index = c("id", "year"), model = "within")
+coeftest(fe_lead)["exec_lead", , drop = FALSE]
+```
+
+> Con la muestra reducida (102 obs.), $x_{i,t+1}$ no resulta significativa ($p\approx0{,}79$); con tan pocos períodos el test tiene muy poca potencia, por lo que no es concluyente.
+
+## (f) GLS en primeras diferencias
+
+**Enunciado.** Repita la estimación del inciso c) usando el estimador de GLS para diferencias finitas de primer orden. Compruebe que los coeficientes estimados son iguales a los obtenidos por FE.
+
+**Resultado (PDF R):** `exec` −0,13832306; `unem` 0,22131582; `d90` 1,5562147; `d93` 1,7332421.
+
+**Solucionario (S):** $\hat\beta^{FDGLS}=\left(\sum_i X_i'D'(DD')^{-1}DX_i\right)^{-1}\left(\sum_i X_i'D'(DD')^{-1}Dy_i\right)=\left(X'(I_N\otimes D'(DD')^{-1}D)X\right)^{-1}\left(X'(I_N\otimes D'(DD')^{-1}D)y\right)$, con $D=\begin{bmatrix}-1&1&0\\0&-1&1\end{bmatrix}$.
+
+**Replicación en R:**
+
+```{r ej2-f}
+Y <- as.matrix(mu$mrdrte)
+X <- as.matrix(mu[, c("exec", "unem", "d90", "d93")])
+D <- rbind(c(-1, 1, 0), c(0, -1, 1))
+Ng <- length(unique(mu$id))                       # 51 estados, 3 períodos c/u (base ordenada)
+
+# FD por MCO: X'(I (x) D'D)X
+DtD     <- t(D) %*% D
+b_fd    <- solve(t(X) %*% kronecker(diag(Ng), DtD) %*% X, t(X) %*% kronecker(diag(Ng), DtD) %*% Y)
+# FD por GLS: X'(I (x) D'(DD')^-1 D)X
+Q       <- t(D) %*% solve(D %*% t(D)) %*% D       # = matriz within M_T (proyector que elimina la media)
+b_fdgls <- solve(t(X) %*% kronecker(diag(Ng), Q) %*% X, t(X) %*% kronecker(diag(Ng), Q) %*% Y)
+
+round(cbind(FD_MCO = b_fd[, 1], FD_GLS = b_fdgls[, 1], FE = coef(fe2)), 8)
+c(dif_GLS_vs_FE = dif(b_fdgls, coef(fe2)), dif_GLS_vs_PDF = dif(b_fdgls, c(-.13832306, .22131582, 1.5562147, 1.7332421)),
+  dif_FD_MCO_vs_inciso_d = dif(b_fd, coef(m2_fd)))
+all.equal(Q, diag(3) - matrix(1/3, 3, 3))          # D'(DD')^-1 D es la matriz de transformación within
+```
+
+> **Nota.** $D'(DD')^{-1}D=I_T-\frac1T\mathbf{1}\mathbf{1}'$ es exactamente la matriz *within*; por eso FD-GLS reproduce FE. El FD por MCO (primer cálculo `bfd` del `.do`) coincide con el inciso (d), no con FE.
+
+## (g) Efectos aleatorios y test de Hausman
+
+**Enunciado.** Reestimar el modelo del inciso c) usando efectos aleatorios. Implementar el test de Hausman. ¿Cuál es el mejor estimador?
+
+**Resultado (PDF R) — RE:** `exec` −0,0543375 (0,1595008); `unem` 0,3947507 (0,2848133); `d90` 1,732981 (0,7478556); `d93` 1,699913 (0,7065606); constante 4,635132 (2,179451); sigma_u = 8,2056677; sigma_e = 3,5214244; rho = 0,84447636. Hausman (`hausman est_fe est_re`): $\chi^2(4)=5{,}78$, $p=0{,}2165$ y la nota "(V_b-V_B is not positive definite)".
+
+**Resolución (PDF R):** "Por lo tanto, se puede observar que, considerando un nivel de significación del 10 %, el mejor estimador es el de efectos fijos, ya que se rechaza la hipótesis nula de no correlación entre los regresores y los efectos fijos, por lo que el estimador de efectos aleatorios no es consistente."
+
+**Solucionario (S):** el test sobre los 4 coeficientes tiene $\hat V(\hat\beta_{FE})-\hat V(\hat\beta_{RE})$ no definida positiva (hay autovalores negativos); como (Wooldridge 2010, p. 239) no se pueden comparar coeficientes de efectos temporales agregados, se repite el test **sólo con `exec` y `unem`** (submatriz 2×2, autovalores positivos): $H=5{,}7757$, $p\approx0{,}06$ ($\chi^2(2)$): no se rechaza al 5 %, pero sí al 10 %. Conclusión: FE.
+
+> **⚠️ DISCREPANCIA 5.** El PDF de resolución (R) concluye "se rechaza la hipótesis nula" al 10 % basándose en la salida que él mismo muestra, pero esa salida es $\chi^2(4)=5{,}78$ con **$p=0{,}2165$**, que **no rechaza** $H_0$ a ningún nivel convencional (y además con matriz de varianzas no definida positiva, por lo que el estadístico no es válido). La conclusión sólo se sostiene con la versión de 2 coeficientes de (S) y del `.do` ($p\approx0{,}056$), que el PDF R **no muestra**; (S) habla de "$p=0{,}06$" que es el valor redondeado. Dicho test sí rechaza al 10 % pero no al 5 %, por lo que la elección FE vs. RE es sensible al nivel de significación.
+
+**Replicación en R:**
+
+```{r ej2-g}
+re2 <- plm(f2, mu, index = c("id", "year"), model = "random")
+summary(re2)
+c(dif_coef_RE = dif(coef(re2), c(4.635132, -.0543375, .3947507, 1.732981, 1.699913)),
+  dif_ee_RE = dif(coef(summary(re2))[, 2], c(2.179451, .1595008, .2848133, .7478556, .7065606)))
+
+# Test de Hausman manual
+b_fe <- coef(fe2); b_re <- coef(re2)[names(b_fe)]
+V    <- vcov(fe2) - vcov(re2)[names(b_fe), names(b_fe)]
+
+# (i) con los 4 coeficientes (lo que hace `hausman` de Stata)
+autoval4 <- eigen(V)$values
+H4 <- as.numeric(t(b_fe - b_re) %*% solve(V) %*% (b_fe - b_re))
+list(autovalores_4x4 = autoval4,                                # hay autovalores negativos: V no es def. positiva
+     chi2_4 = H4, p_4 = pchisq(H4, 4, lower.tail = FALSE))
+phtest(fe2, re2)                                                # idem, con plm
+
+# (ii) sólo exec y unem (submatriz 2x2)
+V2 <- V[1:2, 1:2]; b2 <- (b_fe - b_re)[1:2]
+H2 <- as.numeric(t(b2) %*% solve(V2) %*% b2)
+list(autovalores_2x2 = eigen(V2)$values,                        # ambos positivos
+     chi2_2 = H2, p_2 = pchisq(H2, 2, lower.tail = FALSE))
+```
+
+> Con $p=0{,}0557$ se rechaza $H_0$ al 10 % pero no al 5 %. Reproduce el 5,7757 de (S) y el 5,78 del PDF R (el estadístico es el mismo, pero con 2 g.l. en vez de 4: el rango efectivo de la matriz es 2).
+
+---
+
+# Ejercicio 3
+
+**Enunciado.** Considere el siguiente modelo:
+
+$$y_{it}=x_{it}\beta+\mu_i+\nu_{it},\qquad i=1,\dots,N,\ t=1,\dots,T$$
+
+donde $x_{it}\overset{iid}{\sim}\mathcal N(0,1)$, $u_i\overset{iid}{\sim}\mathcal N(0,\sigma_\mu^2)$, $\nu_{it}\overset{iid}{\sim}\mathcal N(0,\sigma_\nu^2)$ y $\mu_i\perp\nu_{it}$ para todo $i,t$. Suponga que $\beta=\sigma_\mu^2=\sigma_\nu^2=1$ y $T=10$. La idea es realizar experimentos de Monte Carlo para evaluar la eficiencia de distintos estimadores de $\beta$.
+
+- (a) Caso 1: $N=5$. Realice un experimento de Monte Carlo con 1000 simulaciones. Reporte media, desvío estándar y RMSE de la estimación de $\beta$ usando: POLS, RE y FE.
+- (b) Repita el punto anterior con $N=10,30,50,100$ y $500$.
+- (c) Comente los resultados obtenidos y su conclusión de qué estimador debiera utilizarse en la práctica.
+
+> **⚠️ DISCREPANCIA 6 (menor).** El enunciado escribe el efecto individual como $\mu_i$ en el modelo y como $u_i$ en la distribución; se interpreta como la misma variable $\mu_i\sim\mathcal N(0,\sigma_\mu^2)$ (así lo implementa el `.do`).
+
+**Resultado (PDF R):**
+
+| N | POLS media | POLS DE | POLS RMSE | FE media | FE DE | FE RMSE | RE media | RE DE | RE RMSE |
+|---|---|---|---|---|---|---|---|---|---|
+| 5 | 0,99804 | 0,19410 | 0,19402 | 0,99312 | 0,15216 | 0,15224 | 0,99239 | 0,15559 | 0,15569 |
+| 10 | 0,99235 | 0,14171 | 0,14185 | 0,99037 | 0,10713 | 0,10751 | 0,99075 | 0,10657 | 0,10691 |
+| 30 | 1,00196 | 0,07989 | 0,07987 | 1,00219 | 0,06007 | 0,06008 | 1,00224 | 0,05946 | 0,05947 |
+| 50 | 1,00391 | 0,06148 | 0,06158 | 1,00278 | 0,04603 | 0,04609 | 1,00291 | 0,04580 | 0,04587 |
+| 100 | 1,00056 | 0,04522 | 0,04520 | 1,00059 | 0,03388 | 0,03387 | 1,00054 | 0,03359 | 0,03358 |
+| 500 | 0,99964 | 0,02023 | 0,02022 | 0,99968 | 0,01450 | 0,01449 | 0,99967 | 0,01453 | 0,01453 |
+
+**Solucionario (S):** tabla propia (Cuadro 1) con, p. ej., $N=5$: POLS 0,9948 / 0,1986 / 0,1986; RE 0,9959 / 0,1565 / 0,1565; FE 0,9963 / 0,1527 / 0,1527; y para $N=500$: DE de POLS 0,0446, RE 0,0332, FE 0,0334.
+
+**Resolución de (c) (PDF R y S, texto casi idéntico):** los tres estimadores son consistentes; "para $N<10$ el estimador FE es el que mejor funciona en términos de sesgo y de eficiencia. Luego, a partir de un tamaño de muestra de $N=30$ ya se observa cómo el estimador RE es el más eficiente de todos, ... el que presenta un menor desvío estándar ... En resumen, ... para $N$ muy pequeño se optaría por utilizar el estimador FE, mientras que, a partir de $N=30$, se optaría por el estimador RE."
+
+> **⚠️ DISCREPANCIA 7.** Los números del PDF de resolución (R) y los del solucionario (S) **no coinciden**, aunque ambos dicen provenir del mismo diseño (semilla 12345, 1000 réplicas). Además, las cifras de (S) para $N=500$ (DE de POLS 0,0446, RE 0,0332, FE 0,0334) son prácticamente las de $N=100$ y **no respetan el decaimiento $1/\sqrt N$** (de $N=100$ a $N=500$ el desvío debería caer ≈ 2,2 veces: 0,045 → ≈ 0,020 en POLS, que es lo que muestra el PDF R: 0,0202). Todo indica un error en la fila $N=500$ de (S).
+
+> **⚠️ DISCREPANCIA 8 (matiz de la conclusión).** Mirando la tabla del PDF R: ya en $N=10$ el desvío del RE (0,10657) es algo menor que el de FE (0,10713), y en $N=500$ el de FE (0,01450) es apenas menor que el de RE (0,01453). La regla "FE hasta $N<10$, RE desde $N=30$" es una simplificación; las diferencias para $N\ge10$ son mínimas (< 1 %) y están dentro del error de simulación.
+
+**Replicación en R:** implementación vectorizada de POLS, FE y RE (Swamy-Arora, el default de `xtreg, re`); se comprobó que coincide con `plm(model = "random")` en una muestra de prueba.
+
+```{r ej3}
+set.seed(12345)
+beta <- 1; s2mu <- 1; s2nu <- 1; Tt <- 10; reps <- 1000
+
+una_muestra <- function(N) {
+  id <- rep(1:N, each = Tt)
+  x  <- rnorm(N * Tt)
+  y  <- beta * x + rep(rnorm(N, 0, sqrt(s2mu)), each = Tt) + rnorm(N * Tt, 0, sqrt(s2nu))
+  xb <- ave(x, id); yb <- ave(y, id)
+  # POLS
+  b_pols <- cov(x, y) / var(x)
+  # FE (within)
+  xw <- x - xb; yw <- y - yb
+  b_fe <- sum(xw * yw) / sum(xw^2)
+  # RE (Swamy-Arora): sigma_e^2 desde FE, sigma_B^2 desde la regresión between
+  s2e <- sum((yw - b_fe * xw)^2) / (N * Tt - N - 1)
+  xm <- tapply(x, id, mean); ym <- tapply(y, id, mean)
+  s2B <- sum(resid(lm(ym ~ xm))^2) / (N - 2)
+  s2u <- max(s2B - s2e / Tt, 0)
+  th  <- 1 - sqrt(s2e / (s2e + Tt * s2u))
+  xt <- x - th * xb; yt <- y - th * yb
+  b_re <- sum((xt - mean(xt)) * (yt - mean(yt))) / sum((xt - mean(xt))^2)
+  c(pols = b_pols, fe = b_fe, re = b_re)
+}
+
+muestras <- c(5, 10, 30, 50, 100, 500)
+res <- do.call(rbind, lapply(muestras, function(N) {
+  est <- t(replicate(reps, una_muestra(N)))
+  data.frame(N = N,
+             POLS_media = mean(est[, "pols"]), POLS_DE = sd(est[, "pols"]), POLS_RMSE = sqrt(mean((est[, "pols"] - beta)^2)),
+             FE_media   = mean(est[, "fe"]),   FE_DE   = sd(est[, "fe"]),   FE_RMSE   = sqrt(mean((est[, "fe"] - beta)^2)),
+             RE_media   = mean(est[, "re"]),   RE_DE   = sd(est[, "re"]),   RE_RMSE   = sqrt(mean((est[, "re"] - beta)^2)))
+}))
+kable(res, digits = 4, caption = "Replicación en R (los números aleatorios de R difieren de los de Stata)")
+```
+
+Verificación de la implementación frente a `plm` y comparación con el PDF:
+
+```{r ej3-check}
+# La función vectorizada coincide con plm en una muestra (misma semilla => mismos datos)
+N0 <- 20
+set.seed(1); id0 <- rep(1:N0, each = Tt); d0 <- data.frame(id = id0, x = rnorm(N0 * Tt))
+d0$y <- d0$x + rep(rnorm(N0), each = Tt) + rnorm(N0 * Tt)
+c(plm_RE = unname(coef(plm(y ~ x, d0, index = "id", model = "random"))["x"]))
+set.seed(1); una_muestra(N0)["re"]
+
+# Desvíos estándar: PDF R vs. replicación
+pdf_sd <- data.frame(N = muestras,
+  POLS = c(.19410442, .14170935, .07988537, .06148401, .04521915, .02023065),
+  FE   = c(.15215654, .10712643, .06006592, .04603343, .03388418, .01449802),
+  RE   = c(.15558624, .10656719, .05945567, .04579737, .03359240, .01453039))
+cmp <- data.frame(N = muestras,
+  POLS_PDF = pdf_sd$POLS, POLS_R = res$POLS_DE,
+  FE_PDF = pdf_sd$FE, FE_R = res$FE_DE,
+  RE_PDF = pdf_sd$RE, RE_R = res$RE_DE)
+kable(cmp, digits = 4)
+
+# Decaimiento ~ 1/sqrt(N): DE(N=100)/DE(N=500) debería ser ~ sqrt(5) = 2,24
+c(esperado = sqrt(5), PDF_R_POLS = pdf_sd$POLS[5] / pdf_sd$POLS[6], replicacion_POLS = res$POLS_DE[5] / res$POLS_DE[6],
+  S_POLS = 0.0438 / 0.0446)
+```
+
+> **Lectura.** La replicación reproduce el patrón del PDF R: las medias son ≈ 1 (consistencia), el desvío cae como $1/\sqrt N$, POLS es claramente menos eficiente que FE/RE, y entre FE y RE las diferencias son pequeñas (RE ligeramente mejor para $N$ intermedio). Con los números de (S) el cociente de desvíos entre $N=100$ y $N=500$ es ≈ 1 en lugar de ≈ 2,2, lo que confirma la DISCREPANCIA 7.
+> **Conclusión en la práctica:** como el modelo simulado cumple $E[\mu_i\mid x]=0$, RE es el más eficiente (y FE también es consistente); en datos reales conviene decidir con un test de Hausman, ya que bajo $E[\mu_i\mid x]\neq0$ sólo FE es consistente.
+
+---
+
+# Ejercicio 4
+
+**Enunciado.** *Basado en el Ejercicio 10.18 de Wooldridge (2010).* Utilice la base de datos *wagepan.dta* para responder las preguntas a continuación.
+
+```{r ej4-datos}
+wp <- as.data.frame(read_dta("Datos/wagepan.dta"))
+wp <- wp[order(wp$nr, wp$year), ]
+c(N = nrow(wp), trabajadores = length(unique(wp$nr)), anios = length(unique(wp$year)))
+```
+
+## (a) POLS, RE, FE y FD sólo con dummies de año
+
+**Enunciado.** Utilizando *lwage* como variable dependiente, estimar un modelo que contenga un intercepto y las variables dummy de año $d81$ a $d87$. Estime el modelo por POLS, RE, FE y FD. ¿Qué puede concluir acerca de los coeficientes de las variables dummy?
+
+**Resultado (PDF R):** coeficientes idénticos en los cuatro estimadores (`d81` 0,1193902; `d82` 0,1781901; `d83` 0,2257865; `d84` 0,2968181; `d85` 0,3459333; `d86` 0,4062418; `d87` 0,4730023); constante 1,393477 (POLS y RE; FE 1,393477 con EE 0,0151936). EE: POLS 0,0310529; RE y FE 0,021487; FD 0,0190006; 0,0268709; 0,03291; 0,0380011; 0,0424866; 0,0465417; 0,0502708. N = 4360 (3815 en FD). $R^2$: POLS 0,0752, FE within 0,1625, FD 0,0252. RE: sigma_u = 0,37007665, sigma_e = 0,35469771, rho = 0,52120938.
+
+**Resolución (PDF R) y Solucionario (S):** "lo que se puede concluir acerca de los coeficientes de las variables dummy es que son numéricamente idénticos."
+
+**Replicación en R:**
+
+```{r ej4-a}
+dums <- paste0("d", 81:87)
+f4a  <- reformulate(dums, "lwage")
+
+po4a <- lm(f4a, wp)
+re4a <- plm(f4a, wp, index = c("nr", "year"), model = "random")
+fe4a <- plm(f4a, wp, index = c("nr", "year"), model = "within")
+for (v in c("lwage", dums)) wp[[paste0("D_", v)]] <- d1(wp[[v]], wp$nr)
+fd4a <- lm(reformulate(paste0("D_", dums), "D_lwage", intercept = FALSE), wp)
+
+tab4a <- data.frame(
+  POLS = coef(po4a)[dums], `(EE)` = coef(summary(po4a))[dums, 2],
+  RE = coef(re4a)[dums], `(EE) ` = coef(summary(re4a))[dums, 2],
+  FE = coef(fe4a)[dums], `(EE)  ` = coef(summary(fe4a))[dums, 2],
+  FD = coef(fd4a), `(EE)   ` = coef(summary(fd4a))[, 2], check.names = FALSE)
+rownames(tab4a) <- dums
+kable(tab4a, digits = 4)
+c(N_POLS = nobs(po4a), N_FD = nobs(fd4a), cons_POLS = round(coef(po4a)[1], 6), cons_FE = round(unname(within_intercept(fe4a)), 6))
+
+pdf4a <- c(.1193902, .1781901, .2257865, .2968181, .3459333, .4062418, .4730023)
+c(dif_POLS = dif(coef(po4a)[dums], pdf4a), dif_RE = dif(coef(re4a)[dums], pdf4a),
+  dif_FE = dif(coef(fe4a)[dums], pdf4a), dif_FD = dif(coef(fd4a), pdf4a),
+  dif_ee_POLS = dif(coef(summary(po4a))[dums, 2], .0310529), dif_ee_RE = dif(coef(summary(re4a))[dums, 2], .021487),
+  dif_ee_FD = dif(coef(summary(fd4a))[, 2], c(.0190006, .0268709, .03291, .0380011, .0424866, .0465417, .0502708)))
+```
+
+> **Por qué son idénticos:** el panel es balanceado y los regresores son sólo dummies de año (comunes a todos los individuos); los efectos individuales se anulan con la transformación within/FD y, en POLS/RE, las dummies temporales son ortogonales a los efectos individuales en una muestra balanceada.
+
+## (b) Agregando variables constantes en el tiempo
+
+**Enunciado.** Añada las variables constantes en el tiempo *educ*, *black* e *hisp* al modelo, y estímelo por POLS y RE. ¿Cómo se comparan los coeficientes? ¿Qué ocurre si se estima la ecuación por FE?
+
+**Resultado (PDF R):** POLS y RE dan coeficientes idénticos: `educ` 0,0770943; `black` −0,1225637; `hisp` 0,024623; constante 0,4966384. EE POLS: 0,0043766 / 0,0237021 / 0,0213056 / 0,0566686 (constante); EE RE: 0,009177 / 0,0496994 / 0,0446744 / 0,1122718. FE: `educ`, `black`, `hisp` "omitted"; constante 1,393477.
+
+**Resolución (PDF R) y Solucionario (S):** "las estimaciones de POLS y RE son numéricamente idénticas ... si el modelo incluye sólo efectos temporales agregados y covariables específicas del individuo que no tienen variación temporal, entonces, los coeficientes de POLS son iguales a los de RE. Por otra parte, cuando se utiliza FE, no se pueden estimar los coeficientes asociados a las variables constantes en el tiempo ... la estimación de la constante en FE no es igual a la estimación de la constante en POLS/RE."
+
+**Replicación en R:**
+
+```{r ej4-b}
+vs  <- c(dums, "educ", "black", "hisp")
+f4b <- reformulate(vs, "lwage")
+po4b <- lm(f4b, wp)
+re4b <- plm(f4b, wp, index = c("nr", "year"), model = "random")
+fe4b <- plm(f4b, wp, index = c("nr", "year"), model = "within")
+
+names(coef(fe4b))                       # educ, black e hisp se omiten (no varían en el tiempo)
+tab4b <- data.frame(POLS = coef(po4b), `(EE)` = coef(summary(po4b))[, 2],
+                    RE = coef(re4b)[names(coef(po4b))], `(EE) ` = coef(summary(re4b))[names(coef(po4b)), 2],
+                    check.names = FALSE)
+kable(tab4b, digits = 4)
+c(cte_FE = round(unname(within_intercept(fe4b)), 6))
+
+c(dif_coef_POLS_RE = dif(coef(po4b), coef(re4b)[names(coef(po4b))]),
+  dif_ee_POLS_educ = dif(coef(summary(po4b))["educ", 2], .0043766),
+  dif_ee_RE_educ = dif(coef(summary(re4b))["educ", 2], .009177))
+```
+
+> **⚠️ DISCREPANCIA 9 (precisión).** El PDF de resolución afirma que POLS y RE son idénticos "porque el modelo incluye sólo efectos temporales agregados y covariables ... sin variación temporal". La condición completa es que el panel sea **balanceado** (aquí lo es: 545 × 8). En un panel no balanceado la igualdad no tendría por qué cumplirse. (Aclaración, no contradicción.)
+
+## (c) Errores estándar de POLS vs. RE
+
+**Enunciado.** ¿Son iguales los errores estándar de POLS y RE del inciso b)? ¿Cuáles son probablemente más fiables?
+
+**Resolución (PDF R) y Solucionario (S):** "Los errores estándar de POLS y RE del inciso (b) no son iguales. Los errores estándar de POLS suponen, además de homocedasticidad, que no hay correlación serial en el error compuesto, es decir, que no considera la posible presencia de heterogeneidad individual no observable. Los errores estándar de RE, al menos, permiten la presencia de correlación serial (en particular, la cual es igual para todos los pares de períodos $(t,s)$). Esto puede ser demasiado restrictivo, pero es menos restrictivo que los habituales errores estándar de POLS."
+
+> **⚠️ DISCREPANCIA 10 (pregunta sin respuesta explícita).** El enunciado pregunta *cuáles son probablemente más fiables*; ni (R) ni (S) lo dicen de forma explícita: sólo señalan que los de RE son "menos restrictivos". La respuesta implícita es que los de RE son más fiables que los habituales de POLS (los que ignoran la correlación serial); en 4(d) se agrega que ni siquiera los de RE son los preferidos frente a los robustos.
+
+**Replicación en R:**
+
+```{r ej4-c}
+round(cbind(EE_POLS = coef(summary(po4b))[, 2], EE_RE = coef(summary(re4b))[names(coef(po4b)), 2],
+            cociente_RE_POLS = coef(summary(re4b))[names(coef(po4b)), 2] / coef(summary(po4b))[, 2]), 4)
+```
+
+> Para las variables constantes en el tiempo (`educ`, `black`, `hisp`) el EE de RE es ≈ 2 veces el de POLS: el EE habitual de POLS está subestimado porque ignora la correlación serial inducida por $\mu_i$ (para las dummies de año ocurre lo contrario: RE da EE menores, al eliminar la variación individual).
+
+## (d) EE robustos de POLS
+
+**Enunciado.** Obtenga los errores estándar robustos para POLS. ¿Prefiere estos o los errores estándar habituales de RE?
+
+**Resultado (PDF R):** `regress ..., vce(cluster nr)`, 545 clusters: `d81` 0,0244086; `d82` 0,0241987; `d83` 0,0243796; `d84` 0,0271485; `d85` 0,0263181; `d86` 0,0273064; `d87` 0,025996; `educ` 0,0090198; `black` 0,0532662; `hisp` 0,0411235; constante 0,1097474.
+
+**Resolución (PDF R) y Solucionario (S):** "Estos errores estándar robustos permiten cualquier tipo de correlación serial y de heterocedasticidad de los disturbios que varían en el tiempo. Preferimos estos a los errores estándar habituales de RE ya que estos últimos imponen un tipo especial de correlación serial, y, además, asumen homocedasticidad."
+
+**Replicación en R:**
+
+```{r ej4-d}
+G4 <- length(unique(wp$nr))
+V_po4 <- vcovCL(po4b, cluster = wp$nr, type = "HC1")
+ee_po_rob <- sqrt(diag(V_po4))
+coeftest(po4b, vcov. = V_po4, df = G4 - 1)
+
+# EE robustos del PDF, en el orden: constante, d81..d87, educ, black, hisp
+pdf4d_se <- c(.1097474, .0244086, .0241987, .0243796, .0271485, .0263181, .0273064, .025996, .0090198, .0532662, .0411235)
+c(dif_ee_rob = dif(ee_po_rob, pdf4d_se))
+```
+
+## (e) EE robustos de RE
+
+**Enunciado.** Obtenga los errores estándar robustos de RE. ¿Cómo se comparan con los errores estándar robustos de POLS, y por qué?
+
+**Resultado (PDF R):** `xtreg ..., re robust`: los errores estándar son **idénticos** a los robustos de POLS (`d81` 0,0244086; `educ` 0,0090198; `black` 0,0532662; …).
+
+**Resolución (PDF R):** "estos errores estándar son numéricamente idénticos a los errores estándar robustos de POLS porque se tiene un solo estimador y, entonces, hay una sola varianza robusta." **Solucionario (S):** "... porque tenemos un solo estimador (POLS = RE en esta configuración) y, por lo tanto, hay una sola varianza robusta."
+
+> **⚠️ DISCREPANCIA 11 (explicación imprecisa en R).** La explicación del PDF R ("se tiene un solo estimador") es incompleta: POLS y RE son numéricamente el mismo estimador **sólo** porque el panel es balanceado y los regresores son dummies de año y variables constantes en el tiempo (ver 4(b)). Es (S) quien lo aclara con "POLS = RE en esta configuración". Hay además una diferencia menor de implementación en Stata: los intervalos de RE usan $z$ y los de POLS $t$ con 544 g.l. (p. ej. IC de `educ`: [0,0594157; 0,0947728] vs. [0,0593763; 0,0948122]).
+
+**Replicación en R:**
+
+```{r ej4-e}
+V_re4 <- vcovHC(re4b, method = "arellano", type = "HC1", cluster = "group") * G4 / (G4 - 1)
+ee_re_rob <- sqrt(diag(V_re4))
+cmp4e <- data.frame(EE_POLS_robusto = ee_po_rob, EE_RE_robusto = ee_re_rob[names(ee_po_rob)])
+kable(round(cmp4e, 5))
+c(max_dif_POLS_vs_RE = signif(max(abs(cmp4e[, 1] - cmp4e[, 2])), 3), dif_RE_vs_PDF = dif(ee_re_rob[names(ee_po_rob)], pdf4d_se))
+```
+
+> Los errores estándar robustos de RE coinciden con los de POLS (diferencias de orden $10^{-5}$ por detalles de ajuste de muestra finita entre `plm` y Stata), lo que confirma que, en esta configuración, RE y POLS son el mismo estimador.
+
+---
+
+# Resumen de discrepancias
+
+| # | Ej. | Tipo | Descripción |
+|---|---|---|---|
+| 1 | 1(a) | Resolución incompleta | El enunciado pide `egen` (Stata); la resolución sólo dice "Stata." y no hay salida. Se replica con `ave()`. |
+| 2 | 1(d) | **Resolución vs. código vs. solucionario** | El PDF R muestra `xtreg, fe` con EE clusterizados (`lprbarr` 0,0595); el `.do` y (S) usan EE habituales (0,0324). Se replican ambos. |
+| 3 | 2(a) | **Solucionario inconsistente** | (S) dice que las dummies de 1990 y 1993 son significativas, pero su propia tabla da $t$ = 1,47 y 0,91; en 2(d) dice lo contrario; y "significativas ⇒ ausencia de efectos temporales" está invertido. El PDF R no interpreta. |
+| 4 | 2(c) | Código / resolución incompleta | `mrdrt` vs. `mrdrte` en el `.do` (sólo funciona por abreviatura); el PDF R no muestra LSDV. |
+| 5 | 2(g) | **Resolución vs. su propia salida** | El PDF R concluye que se rechaza $H_0$ al 10 %, pero su salida es $\chi^2(4)=5{,}78$, $p=0{,}2165$ (V no definida positiva). El rechazo sólo sale del test de 2 coeficientes ($p=0{,}0557$) que muestran el `.do` y (S) pero no el PDF R. |
+| 6 | 3 | Menor | Notación $\mu_i$ / $u_i$ en el enunciado. |
+| 7 | 3 | **Resolución vs. solucionario** | Las tablas de simulación de (R) y (S) no coinciden; la fila $N=500$ de (S) no respeta el decaimiento $1/\sqrt N$ (parece repetir $N=100$). |
+| 8 | 3(c) | Matiz | "FE para $N<10$, RE desde $N=30$": ya en $N=10$ RE tiene menor DE, y en $N=500$ FE es apenas menor; diferencias < 1 %. |
+| 9 | 4(b) | Aclaración | POLS = RE requiere panel balanceado (no sólo regresores sin variación temporal). |
+| 10 | 4(c) | Pregunta sin respuesta explícita | No se dice cuáles errores estándar son más fiables, sólo que los de RE son "menos restrictivos". |
+| 11 | 4(e) | Explicación imprecisa | "Un solo estimador" es incompleto: la causa es POLS = RE en esta configuración; diferencia $z$/$t$ en los IC. |

@@ -1,0 +1,765 @@
+---
+title: "Examen Final - Análisis Estadístico Multivariado"
+subtitle: "Maestría en Econometría UTDT"
+author: "Juan Menduiña"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: false
+    self_contained: true
+    df_print: paged
+lang: es
+---
+
+*Este trabajo está basado en los Indicadores de Desarrollo Mundial que publica el Banco Mundial. Estos indicadores comprenden una selección de variables económicas, sociales y ambientales conformada a partir de información del Banco Mundial y otras agencias. La base de datos completa cubre más de 1400 indicadores referidos a más de 200 economías a partir del año 1960 y se actualiza de manera periódica. El objetivo de este trabajo es aplicar herramientas del análisis multivariado para realizar una descripción completa que permita comprender las similitudes y diferencias entre los países latinoamericanos y las interrelaciones entre las características analizadas en términos de desarrollo.*
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.align = "center", fig.width = 8, fig.height = 5)
+options(digits = 7, OutDec = ".")
+
+if (!requireNamespace("haven", quietly = TRUE)) install.packages("haven")
+library(haven)
+
+# Carpeta con las bases (Base.dta, Base_aux.dta). Se asume que este Rmd está en la carpeta "Examen".
+datos <- "Datos"
+
+fmt <- function(x, d = 4) format(x, digits = d, decimal.mark = ",")
+tabla <- function(x, d = 4, ...) knitr::kable(x, digits = d, format.args = list(decimal.mark = ","), ...)
+tabla_mv <- function(x) knitr::kable(x, digits = 4, format.args = list(decimal.mark = ","), na = "")
+tabla_cient <- function(m) knitr::kable(apply(m, 2, function(c) format(c, digits = 6, decimal.mark = ",")))
+azul <- "#1A476F"; rojo <- "#8B2635"
+
+#-------------------------------------------------------------------------------
+# Funciones auxiliares
+#-------------------------------------------------------------------------------
+
+# tabstat, statistics(mean variance cv)
+tabstat_mvc <- function(df) t(sapply(df, function(x) c(Media = mean(x), Varianza = var(x), CV = sd(x) / mean(x))))
+
+# summarize, detail (percentiles tipo 2, asimetría y curtosis con momentos poblacionales, como Stata)
+resumen_detalle <- function(x) {
+  x <- sort(x); n <- length(x); m2 <- mean((x - mean(x))^2)
+  list(pct = quantile(x, c(.01, .05, .10, .25, .50, .75, .90, .95, .99), type = 2),
+       menores = head(x, 4), mayores = tail(x, 4),
+       resto = c(Obs = n, Media = mean(x), `Desv. est.` = sd(x), Varianza = var(x),
+                 Asimetría = mean((x - mean(x))^3) / m2^1.5, Curtosis = mean((x - mean(x))^4) / m2^2))
+}
+
+# Medidas globales de variabilidad
+medidas_globales <- function(M) {
+  p <- ncol(M)
+  c(`Varianza total` = sum(diag(M)), `Varianza media` = sum(diag(M)) / p,
+    `Varianza generalizada` = det(M), `Varianza efectiva` = det(M)^(1 / p))
+}
+
+# Componentes principales (matriz de correlaciones o de covarianzas); 'ref' fija el signo de los
+# primeros componentes (la variable ref[k] debe tener carga positiva en el componente k)
+pca_r <- function(X, tipo = c("cor", "cov"), ref = NULL) {
+  tipo <- match.arg(tipo)
+  e <- eigen(if (tipo == "cor") cor(X) else cov(X), symmetric = TRUE)
+  V <- e$vectors
+  for (k in seq_along(ref)) if (V[ref[k], k] < 0) V[, k] <- -V[, k]
+  dimnames(V) <- list(colnames(X), paste0("Comp", seq_len(ncol(X))))
+  list(ev = e$values, V = V, tipo = tipo)
+}
+
+tabla_pca <- function(ev) {
+  data.frame(Autovalor = ev, Diferencia = c(-diff(ev), NA), Proporción = ev / sum(ev),
+             Acumulada = cumsum(ev / sum(ev)), row.names = paste0("Comp", seq_along(ev)))
+}
+
+screeplot_r <- function(ev, titulo, kaiser = TRUE) {
+  plot(seq_along(ev), ev, type = "b", pch = 19, col = azul, main = titulo,
+       xlab = "Componente", ylab = "Autovalor", ylim = c(0, max(ev) * 1.05))
+  if (kaiser) abline(h = 1, col = "red")
+}
+
+barras_prop <- function(ev, tipo) {
+  prop <- ev / sum(ev); acum <- cumsum(prop)
+  for (i in 1:2) {
+    y <- if (i == 1) prop else acum
+    titulo <- if (i == 1) "Porcentaje de varianza explicada por cada componente" else
+      "Porcentaje acumulado de varianza explicada por cada componente"
+    b <- barplot(y, names.arg = seq_along(y), ylim = c(0, 1.08), yaxt = "n", space = 0.4, col = azul,
+                 xlab = "Componente", main = paste0(titulo, "\n(basado en ", tipo, ")"))
+    axis(2, at = seq(0, 1, 0.1), labels = paste0(seq(0, 100, 10), "%"), las = 1)
+    text(b, y, labels = formatC(y, digits = 3, format = "g"), pos = 3, cex = 0.8)
+  }
+}
+
+# Biplot a partir de la descomposición en valores singulares de la matriz estandarizada
+# (equivalente a "biplot, std alpha(c)" de Stata): filas = U D^c, columnas = V D^(1-c)
+biplot_svd <- function(M, c, etiq_filas, titulo, orient = c(NA, NA)) {
+  Z <- scale(as.matrix(M)); s <- svd(Z); d <- s$d
+  filas <- s$u[, 1:2] %*% diag(d[1:2]^c)
+  cols <- s$v[, 1:2] %*% diag(d[1:2]^(1 - c)); rownames(cols) <- colnames(M)
+  for (k in 1:2) if (!is.na(orient[k]) && cols[orient[k], k] < 0) { filas[, k] <- -filas[, k]; cols[, k] <- -cols[, k] }
+  rx <- range(c(filas[, 1], cols[, 1], 0)); ry <- range(c(filas[, 2], cols[, 2], 0))
+  rx <- rx + c(-1, 1) * diff(rx) * 0.12; ry <- ry + c(-1, 1) * diff(ry) * 0.12
+  plot(filas, pch = 19, col = azul, cex = 0.6, xlim = rx, ylim = ry, asp = 1, xlab = "Dimensión 1",
+       ylab = "Dimensión 2", main = titulo)
+  abline(h = 0, v = 0, col = "red")
+  text(filas, labels = etiq_filas, pos = 4, cex = 0.5, col = azul, xpd = NA)
+  arrows(0, 0, cols[, 1], cols[, 2], col = "darkgreen", length = 0.08)
+  text(cols * 1.07, labels = colnames(M), col = "darkgreen", cex = 0.5, xpd = NA)
+  invisible(list(filas = filas, cols = cols, s = s, Z = Z))
+}
+
+# k-medias con centros iniciales = primeras k observaciones (start(firstk)) y test F de kmedtest.do
+kmedias <- function(X, k) {
+  X <- as.matrix(X)
+  kmeans(X, centers = X[seq_len(k), , drop = FALSE], algorithm = "Lloyd", iter.max = 100)$cluster
+}
+scdg <- function(X, cl) {
+  X <- as.matrix(X)
+  sum(sapply(unique(cl), function(g) {
+    Xg <- X[cl == g, , drop = FALSE]; ng <- nrow(Xg)
+    ng * if (ng > 1) sum(apply(Xg, 2, var)) else 0
+  }))
+}
+kmedtest <- function(X, k) {
+  X <- as.matrix(X); N <- nrow(X); p <- ncol(X)
+  G <- scdg(X, kmedias(X, k)); G1 <- scdg(X, kmedias(X, k + 1))
+  est <- (G - G1) / (G / (N - k - 1))
+  c(Grupos = k, `vs.` = k + 1, `SCDG (k)` = G, `SCDG (k+1)` = G1, `Estadístico F` = est,
+    `Valor p` = pf(est, p, p * (N - k - 1), lower.tail = FALSE))
+}
+
+# Tests de normalidad multivariada y de diagonalidad (equivalentes a "mvtest" de Stata)
+decision <- function(p) {
+  ifelse(p < 0.01, "Rechaza H0 al 1%", ifelse(p < 0.05, "Rechaza H0 al 5%",
+  ifelse(p < 0.10, "Rechaza H0 al 10%", "No rechaza H0 (10%)")))
+}
+fila <- function(prueba, valor, est, dist, p) {
+  data.frame(Prueba = prueba, Valor = valor, `Estadístico` = est, `Distribución` = dist,
+             `Valor p` = p, `Decisión` = decision(p), check.names = FALSE)
+}
+mv_normalidad <- function(X) {
+  # Los cuatro tests son invariantes ante cambios de escala de las variables; se estandarizan
+  # para evitar problemas numéricos (el PIB tiene una varianza del orden de 10^23)
+  X <- scale(as.matrix(X)); n <- nrow(X); p <- ncol(X)
+  Xc <- sweep(X, 2, colMeans(X)); Sml <- crossprod(Xc) / n
+  M <- Xc %*% solve(Sml) %*% t(Xc)
+  b1 <- sum(M^3) / n^2; b2 <- sum(diag(M)^2) / n
+  kappa <- (p + 1) * (n + 1) * (n + 3) / (n * ((n + 1) * (p + 1) - 6))
+  chi_sk <- n * kappa * b1 / 6; df_sk <- p * (p + 1) * (p + 2) / 6
+  chi_ku <- ((b2 - p * (p + 2)) / sqrt(8 * p * (p + 2) / n))^2
+  beta <- (1 / sqrt(2)) * ((2 * p + 1) * n / 4)^(1 / (p + 4))
+  Dj <- diag(M); Djk <- outer(Dj, Dj, "+") - 2 * M
+  HZ <- n * (sum(exp(-beta^2 / 2 * Djk)) / n^2 -
+             2 * (1 + beta^2)^(-p / 2) * mean(exp(-beta^2 / (2 * (1 + beta^2)) * Dj)) + (1 + 2 * beta^2)^(-p / 2))
+  a <- 1 + 2 * beta^2; w <- (1 + beta^2) * (1 + 3 * beta^2)
+  mu <- 1 - a^(-p / 2) * (1 + p * beta^2 / a + p * (p + 2) * beta^4 / (2 * a^2))
+  s2 <- 2 * (1 + 4 * beta^2)^(-p / 2) + 2 * a^(-p) * (1 + 2 * p * beta^4 / a^2 + 3 * p * (p + 2) * beta^8 / (4 * a^4)) -
+    4 * w^(-p / 2) * (1 + 3 * p * beta^4 / (2 * w) + p * (p + 2) * beta^8 / (2 * w^2))
+  lm <- log(sqrt(mu^4 / (s2 + mu^2))); lv <- log((s2 + mu^2) / mu^2)
+  chi_hz <- ((log(HZ) - lm) / sqrt(lv))^2
+  Z <- Xc %*% diag(1 / sqrt(diag(Sml)), p)
+  e <- eigen(crossprod(Z) / n, symmetric = TRUE)
+  Y <- Z %*% e$vectors %*% diag(1 / sqrt(e$values), p) %*% t(e$vectors)
+  sk <- apply(Y, 2, function(y) mean(y^3) / mean(y^2)^1.5); ku <- apply(Y, 2, function(y) mean(y^4) / mean(y^2)^2)
+  bs <- 3 * (n^2 + 27 * n - 70) * (n + 1) * (n + 3) / ((n - 2) * (n + 5) * (n + 7) * (n + 9))
+  W2 <- -1 + sqrt(2 * (bs - 1)); dl <- 1 / sqrt(log(sqrt(W2)))
+  yv <- sk * sqrt((W2 - 1) * (n + 1) * (n + 3) / (12 * (n - 2))); z1 <- dl * log(yv + sqrt(yv^2 + 1))
+  d <- (n - 3) * (n + 1) * (n^2 + 15 * n - 4)
+  aa <- (n - 2) * (n + 5) * (n + 7) * (n^2 + 27 * n - 70) / (6 * d); cc <- (n - 7) * (n + 5) * (n + 7) * (n^2 + 2 * n - 5) / (6 * d)
+  kk <- (n + 5) * (n + 7) * (n^3 + 37 * n^2 + 11 * n - 313) / (12 * d)
+  al <- aa + sk^2 * cc; chi <- (ku - 1 - sk^2) * 2 * kk
+  z2 <- (((chi / (2 * al))^(1 / 3)) - 1 + 1 / (9 * al)) * sqrt(9 * al)
+  DH <- sum(z1^2 + z2^2)
+  rbind(
+    fila("Mardia mSkewness", b1, chi_sk, paste0("chi2(", df_sk, ")"), pchisq(chi_sk, df_sk, lower.tail = FALSE)),
+    fila("Mardia mKurtosis", b2, chi_ku, "chi2(1)", pchisq(chi_ku, 1, lower.tail = FALSE)),
+    fila("Henze-Zirkler", HZ, chi_hz, "chi2(1)", pchisq(chi_hz, 1, lower.tail = FALSE)),
+    fila("Doornik-Hansen", NA_real_, DH, paste0("chi2(", 2 * p, ")"), pchisq(DH, 2 * p, lower.tail = FALSE)))
+}
+mv_diagonalidad <- function(X) {
+  X <- as.matrix(X); n <- nrow(X); p <- ncol(X)
+  ch <- -(n - 1 - (2 * p + 5) / 6) * log(det(cor(X))); df <- p * (p - 1) / 2
+  fila("Diagonalidad (LR ajustado)", NA_real_, ch, paste0("chi2(", df, ")"), pchisq(ch, df, lower.tail = FALSE))
+}
+lr_independencia <- function(X) {
+  X <- as.matrix(X); n <- nrow(X); p <- ncol(X)
+  ch <- -(n - (2 * p + 5) / 6) * log(det(cor(X))); df <- p * (p - 1) / 2
+  list(chi2 = ch, df = df, p = pchisq(ch, df, lower.tail = FALSE))
+}
+
+# Análisis factorial por factores principales (Stata: factor, pf) y por máxima verosimilitud (ftest.do)
+pf_fit <- function(X) {
+  R <- cor(X); Rr <- R; diag(Rr) <- 1 - 1 / diag(solve(R))
+  e <- eigen(Rr, symmetric = TRUE)
+  list(R = R, ev = e$values, V = e$vectors, nombres = colnames(X))
+}
+pf_cargas <- function(f, m, ref = NULL) {
+  L <- f$V[, 1:m, drop = FALSE] %*% diag(sqrt(f$ev[1:m]), m)
+  for (k in 1:m) if (sum(L[, k]) < 0) L[, k] <- -L[, k]
+  for (k in seq_along(ref)) if (L[ref[k], k] < 0) L[, k] <- -L[, k]
+  dimnames(L) <- list(f$nombres, paste0("Factor", 1:m)); L
+}
+ml_fa <- function(R, m, N, lower = 1e-6) {
+  ctrl <- list(lower = lower, opt = list(maxit = 5000))
+  r <- tryCatch(factanal(covmat = R, factors = m, n.obs = N, rotation = "none", control = ctrl), error = function(e) NULL)
+  s <- 0
+  while (is.null(r) && s < 200) { s <- s + 1; set.seed(s)
+    r <- tryCatch(factanal(covmat = R, factors = m, n.obs = N, rotation = "none", start = runif(nrow(R), 0.2, 0.8),
+                           control = ctrl), error = function(e) NULL) }
+  r
+}
+bic_factores <- function(X, ms, alpha = 0.05) {
+  N <- nrow(X); p <- ncol(X); Co <- cor(X)
+  filas <- lapply(ms, function(m) {
+    gl <- ((p - m)^2 - (p + m)) / 2
+    fa <- if (gl > 0) ml_fa(Co, m, N) else NULL
+    if (is.null(fa)) return(NULL)
+    Vo <- fa$loadings %*% t(fa$loadings) + diag(fa$uniquenesses); dif <- log(det(Vo)) - log(det(Co))
+    est <- ((N - 1) - (2 * p + 4 * m + 5) / 6) * dif
+    data.frame(Factores = m, `Estadístico` = est, gl = gl, `Valor crítico` = qchisq(1 - alpha, gl),
+               `Valor p` = pchisq(est, gl, lower.tail = FALSE), AIC = N * dif - ((p - m)^2 - p - m),
+               BIC = N * dif - gl * log(N), check.names = FALSE)
+  })
+  do.call(rbind, filas)
+}
+
+# Análisis factorial completo (factores principales) y análisis de residuos como en el do-file
+analisis_factorial <- function(X, m, ref = NULL) {
+  f <- pf_fit(X); R <- f$R; L <- pf_cargas(f, m, ref); psi <- 1 - rowSums(L^2)
+  names(psi) <- colnames(X)
+  B <- solve(R) %*% L                                    # coeficientes de scoring (regresión)
+  Z <- scale(as.matrix(X)); F <- Z %*% B                 # factores estimados
+  Xc <- sweep(as.matrix(X), 2, colMeans(X))
+  resid_do <- Xc - F %*% t(L)                            # residuos como en el do-file (X centrada)
+  resid_std <- Z - F %*% t(L)                            # residuos con variables estandarizadas
+  list(f = f, R = R, L = L, psi = psi, com = 1 - psi, F = F, resid_do = resid_do, resid_std = resid_std,
+       rho2 = 1 - psi^2, r2 = 1 - (prod(psi) / det(R))^(1 / ncol(X)), Sigma_hat = L %*% t(L) + diag(psi))
+}
+```
+
+# Ejercicio 1
+
+*A partir de la base de datos disponible, elegir un subconjunto de 5 a 20 indicadores y un año de referencia para efectuar el análisis. Ésta será la matriz de datos que se utilizará durante todo el examen. Cualquier subconjunto de información es válido, no hay elecciones incorrectas; sin embargo, verificar que la cantidad de observaciones disponibles supere a la cantidad de variables elegidas.*
+
+Se seleccionaron los siguientes 10 indicadores para el año 2020:
+
+```{r ej1}
+base <- as.data.frame(read_dta(file.path(datos, "Base.dta")))
+vars <- c("BN_CAB_XOKA_GD_ZS", "EG_ELC_ACCS_ZS", "EN_ATM_CO2E_PC", "IT_NET_USER_ZS", "NE_CON_GOVT_ZS",
+          "NE_GDI_TOTL_ZS", "NY_GDP_MKTP_KD", "NY_GDP_PCAP_KD", "SP_DYN_LE00_IN", "SP_POP_DPND")
+X <- base[vars]; rownames(X) <- base$country
+p <- length(vars); n <- nrow(X)
+data.frame(Código = vars, Indicador = sapply(base[vars], function(x) attr(x, "label")), row.names = NULL)
+```
+
+El do-file arma `Base.dta` a partir de `Base_aux.dta` (formato ancho del archivo `Base.xlsx`) conservando el año 2020 y los países sin valores faltantes en los 10 indicadores. Se verifica que ese filtro reproduce la base utilizada:
+
+```{r ej1-verif}
+aux <- as.data.frame(read_dta(file.path(datos, "Base_aux.dta")))
+sel <- aux[aux$year == 2020, c("country", paste0("yr", vars))]
+sel <- sel[complete.cases(sel), ]
+sel <- sel[order(sel$country), ]
+c(`Países con datos completos` = nrow(sel),
+  `Coincide con Base.dta` = isTRUE(all.equal(unname(as.matrix(sel[paste0("yr", vars)])), unname(as.matrix(X)), check.attributes = FALSE)))
+```
+
+La cantidad de observaciones es `r n`:
+
+```{r ej1-paises}
+base$country
+```
+
+Por lo tanto, n = `r n` > p = `r p`, por lo que la cantidad de observaciones disponibles supera a la cantidad de variables elegidas.
+
+
+# Ejercicio 2
+
+*Realizar un breve análisis descriptivo de la información disponible para el conjunto de variables y año elegidos. Calcular y describir distintas medidas de variabilidad global de los datos.*
+
+**Media, varianza y coeficiente de variación:**
+
+```{r ej2-desc}
+ts <- tabstat_mvc(X)
+tabla(t(ts), d = 5)
+```
+
+Se puede observar que las variables "Current account balance (% of GDP)" y "Life expectancy at birth, total (years)" son las que tienen un mayor y menor coeficiente de variación, respectivamente. Ambos resultados son, relativamente, esperables, debido a la alta volatilidad que suele tener la cuenta corriente y a la, esperable, baja volatilidad que tiene la esperanza de vida.
+
+```{r ej2-cv}
+cv <- ts[, "CV"]
+```
+
+> **⚠ Anotación (el coeficiente de variación de la cuenta corriente no es interpretable tal cual):** el promedio de `BN_CAB_XOKA_GD_ZS` es negativo (`r fmt(ts["BN_CAB_XOKA_GD_ZS", "Media"], 4)`), por lo que su coeficiente de variación es **negativo** (`r fmt(cv["BN_CAB_XOKA_GD_ZS"], 4)`) y, en rigor, "el mayor" CV (con signo) es el de `NY_GDP_MKTP_KD` (`r fmt(max(cv), 4)`). La afirmación del informe es correcta si se compara el **valor absoluto** del coeficiente (`r fmt(abs(cv["BN_CAB_XOKA_GD_ZS"]), 4)`, el mayor de todos). El menor coeficiente de variación es, efectivamente, el de la esperanza de vida (`r fmt(min(abs(cv)), 4)`). Cuando la media es cercana a cero o negativa, el coeficiente de variación pierde significado como medida de dispersión relativa.
+
+**Medidas de variabilidad global** (C = matriz de correlaciones; S = matriz de varianzas y covarianzas):
+
+```{r ej2-glob}
+C <- cor(X); S <- cov(X)
+glob <- rbind(C = medidas_globales(C), S = medidas_globales(S))
+tabla_cient(glob)
+```
+
+- Varianza total C = `r fmt(glob["C", 1], 6)`; varianza media C = `r fmt(glob["C", 2], 6)`; varianza generalizada C = `r format(glob["C", 3], digits = 6, decimal.mark = ",")`; varianza efectiva C = `r fmt(glob["C", 4], 8)`.
+- Varianza total S = `r format(glob["S", 1], digits = 4, decimal.mark = ",")`; varianza media S = `r format(glob["S", 2], digits = 4, decimal.mark = ",")`; varianza generalizada S = `r format(glob["S", 3], digits = 4, decimal.mark = ",")`; varianza efectiva S = `r fmt(glob["S", 4], 8)`.
+
+Por lo tanto, se puede observar que, para el caso de la matriz de correlaciones, la varianza total (que es igual a la traza de la matriz de correlaciones) es igual a 10 y la varianza media (que es igual a la varianza total sobre la cantidad de variables) es igual a 1. Al no tener en cuenta la estructura de dependencia entre las variables, se computan la varianza generalizada (que es igual al determinante de la matriz de correlaciones) y la varianza efectiva (que es igual a la raíz p -variables- de la varianza generalizada), siendo esta última la que serviría para comparar conjuntos de datos con distinta cantidad de variables y que, en este caso, nos indica que hay cierta relación relevante entre estas variables.
+
+
+# Ejercicio 3
+
+*Calcular la matriz de varianzas y covarianzas y la matriz de correlaciones muestrales e interpretar, brevemente, sus resultados.*
+
+**Matriz de varianzas y covarianzas:**
+
+```{r ej3-S}
+tabla_cient(S)
+```
+
+**Matriz de correlaciones muestrales:**
+
+```{r ej3-C}
+tabla(C, d = 4)
+```
+
+Por un lado, se puede observar cómo "Life expectancy at birth, total (years)" se correlaciona negativamente con todas las variables excepto con "Current account balance (% of GDP)", mientras que ésta, además, se correlaciona negativamente con todas las variables excepto con "GDP (constant 2015 US$)". Por otro lado, se observa cómo el resto de las variables se correlacionan positivamente entre sí, excepto entre "Individuals using the Internet (% of population)" y "GDP (constant 2015 US$)".
+
+```{r ej3-anot}
+le <- "SP_DYN_LE00_IN"; bn <- "BN_CAB_XOKA_GD_ZS"
+neg_le <- names(which(C[le, vars != le] < 0)); pos_bn <- names(which(C[bn, vars != bn] > 0))
+cor_it_gdp <- C["IT_NET_USER_ZS", "NY_GDP_MKTP_KD"]
+resto <- setdiff(vars, c(le, bn))
+Cr <- C[resto, resto]
+neg_resto <- which(Cr < 0 & upper.tri(Cr), arr.ind = TRUE)
+pares_neg <- if (nrow(neg_resto) > 0) paste0(resto[neg_resto[, 1]], "-", resto[neg_resto[, 2]], " (", fmt(Cr[neg_resto], 3), ")", collapse = "; ") else "ninguno"
+```
+
+> **⚠ Anotación (la descripción del PDF no coincide con la matriz de correlaciones):**
+>
+> - **Esperanza de vida:** el informe dice que se correlaciona *negativamente con todas las variables excepto con la cuenta corriente*. Según la matriz, es al revés: la esperanza de vida se correlaciona **positivamente** con casi todas las variables y **negativamente solo** con `r paste(neg_le, collapse = " y ")` (`r paste(fmt(C[le, neg_le], 3), collapse = " y ")`).
+> - **Cuenta corriente:** el informe dice que se correlaciona negativamente con todas las variables excepto con "GDP (constant 2015 US$)". La matriz muestra **dos** excepciones: `r paste(pos_bn, collapse = " y ")` (`r paste(fmt(C[bn, pos_bn], 3), collapse = " y ")`); la correlación con `SP_POP_DPND` es, de hecho, la más alta.
+> - **Resto de las variables:** el informe dice que se correlacionan positivamente entre sí excepto entre Internet y "GDP (constant 2015 US$)". Pero esa correlación es **positiva** (`r fmt(cor_it_gdp, 3)`); las correlaciones negativas entre las demás variables son: `r pares_neg`.
+
+
+# Ejercicio 4
+
+*Realizar un análisis de componentes principales utilizando tanto la matriz de varianzas y covarianzas como la matriz de correlaciones. Describir, de manera general, los resultados obtenidos en cada caso y comparar los resultados destacando diferencias y/o similitudes entre ambos casos. En particular, describir la proporción de varianza explicada por cada componente principal. Elegir los resultados de uno de estos análisis para continuar con la próxima consigna.*
+
+**Basado en matriz de varianzas y covarianzas:**
+
+```{r ej4-cov}
+pc_cov <- pca_r(X, "cov")
+tabla_cient(as.matrix(tabla_pca(pc_cov$ev)))
+tabla(pc_cov$V[, 1:2], d = 4)
+```
+
+```{r ej4-cov-graf, fig.height = 4.5}
+screeplot_r(pc_cov$ev, "PCA\n(basado en matriz de varianzas y covarianzas)", kaiser = FALSE)
+barras_prop(pc_cov$ev, "matriz de varianzas y covarianzas")
+```
+
+Por lo tanto, basando el análisis de componentes principales en la matriz de varianzas y covarianzas, toda la varianza es explicada por un solo componente principal (`r fmt(100 * pc_cov$ev[1] / sum(pc_cov$ev), 6)`% de la varianza total), lo cual se debe a la, relativamente, alta varianza de la variable "GDP (constant 2015 US$)" (la carga de ese indicador en el primer componente es de `r fmt(abs(pc_cov$V["NY_GDP_MKTP_KD", 1]), 4)`).
+
+> *Nota: Stata muestra los componentes 2 a 10 con autovalor exactamente 0; en R se calculan todos los autovalores y los componentes 2 a 10 son positivos pero insignificantes frente al primero (suman `r fmt(100 * sum(pc_cov$ev[-1]) / sum(pc_cov$ev), 3)`% de la varianza total), por lo que la conclusión es la misma.*
+
+**Basado en matriz de correlaciones:**
+
+```{r ej4-cor}
+pc <- pca_r(X, "cor", ref = c(4, 2))      # IT_NET_USER_ZS positiva en el comp. 1; EG_ELC_ACCS_ZS en el 2
+tabla(tabla_pca(pc$ev), d = 4)
+tabla(pc$V, d = 4)
+```
+
+```{r ej4-cor-graf, fig.height = 4.5}
+screeplot_r(pc$ev, "PCA\n(basado en matriz de correlaciones)")
+barras_prop(pc$ev, "matriz de correlaciones")
+```
+
+Por lo tanto, basando el análisis de componentes principales en la matriz de correlaciones, los primeros cuatro componentes principales explican el `r fmt(100 * sum(pc$ev[1:4]) / sum(pc$ev), 4)`% de toda la varianza. Considerando la varianza media (igual a 1), se seleccionarían los dos primeros componentes principales (ya que estos tienen un autovalor mayor a 1), mientras que, considerando un umbral de 80% de varianza a explicar, se seleccionarían los cuatro primeros componentes principales.
+
+Se elige el análisis de componentes principales basado en la matriz de correlaciones para continuar con la siguiente consigna y se sugiere extraer los dos primeros componentes principales.
+
+> *Nota: se elige la matriz de correlaciones porque las variables están medidas en unidades muy distintas (el PIB en dólares constantes tiene una varianza del orden de 10^23, frente a menos de 300 de las demás), y el análisis sobre la matriz de covarianzas reflejaría solo la escala de una variable. Los dos primeros componentes explican `r fmt(100 * sum(pc$ev[1:2]) / sum(pc$ev), 4)`% de la varianza.*
+
+
+# Ejercicio 5
+
+*Tomando en cuenta las primeras dos componentes principales del análisis elegido en el ejercicio anterior, calcular los coeficientes de correlación de cada componente principal con respecto a cada variable original. Interpretar la representación de las primeras 2 componentes principales en términos de su correlación con las variables que las definen.*
+
+```{r ej5}
+U <- scale(as.matrix(X)) %*% pc$V[, 1:2]; colnames(U) <- c("u_1", "u_2")
+cor_comp <- t(cor(U, X)); colnames(cor_comp) <- c("u_1", "u_2")
+tabla(cor_comp, d = 4)
+```
+
+Por lo tanto, se puede observar que el primer componente principal se correlaciona positivamente con todas las variables excepto con "Age dependency ratio (% of working-age population)" y "Current account balance (% of GDP)", mientras que el segundo componente principal se correlaciona positivamente con "Current account balance (% of GDP)", "Access to electricity (% of population)", "Individuals using the Internet (% of population)", "General government final consumption expenditure (% of GDP)", "GDP (constant 2015 US$)" y "Life expectancy at birth, total (years)", y negativamente con "CO2 emissions (metric tons per capita)", "Gross capital formation (% of GDP)", "GDP per capita (constant 2015 US$)" y "Age dependency ratio (% of working-age population)".
+
+En resumen, se puede decir que:
+
+- el primer componente principal tomará valores altos en aquellos países en donde las variables "Age dependency ratio (% of working-age population)" y "Current account balance (% of GDP)" resulten menos importantes, en términos relativos, a las restantes; y
+- el segundo componente principal tomará valores altos en aquellos países en donde las variables que ponderan con un signo positivo en el autovector resulten más importantes, en términos relativos, a las restantes.
+
+```{r ej5-verif}
+sig1 <- names(which(cor_comp[, 1] < 0)); sig2_pos <- names(which(cor_comp[, 2] > 0)); sig2_neg <- names(which(cor_comp[, 2] < 0))
+```
+
+(Verificación con la tabla: el primer componente tiene correlación negativa solo con `r paste(sig1, collapse = " y ")`; el segundo, positiva con `r paste(sig2_pos, collapse = ", ")` y negativa con `r paste(sig2_neg, collapse = ", ")`, lo que coincide con la descripción de arriba.)
+
+
+# Ejercicio 6
+
+*Calcular el valor de las primeras 2 componentes principales para cada una de las observaciones (países). Realizar un breve análisis de estadística descriptiva de cada una de ellas.*
+
+```{r ej6, results='asis'}
+for (k in 1:2) {
+  r <- resumen_detalle(U[, k])
+  cat("\n\n**Componente principal ", k, ":**\n\n", sep = "")
+  print(tabla(data.frame(Percentil = c("1%", "5%", "10%", "25%", "50%", "75%", "90%", "95%", "99%"), Valor = unname(r$pct)), d = 6))
+  cat("\n\nMenores: ", paste(fmt(r$menores, 6), collapse = "; "), " - Mayores: ", paste(fmt(r$mayores, 6), collapse = "; "), "\n\n", sep = "")
+  print(tabla(as.data.frame(t(r$resto)), d = 6))
+}
+rank_u <- data.frame(País = base$country, u1 = U[, 1], u2 = U[, 2])
+```
+
+Puntuaciones de cada país en los dos primeros componentes:
+
+```{r ej6-scores}
+tabla(rank_u, d = 4)
+min1 <- rank_u$País[which.min(U[, 1])]; max1 <- rank_u$País[which.max(U[, 1])]
+min2 <- rank_u$País[which.min(U[, 2])]; max2 <- rank_u$País[which.max(U[, 2])]
+```
+
+Por lo tanto, se puede observar que el menor valor del componente 1 es `r fmt(min(U[, 1]), 7)` (correspondiente a `r min1`, que tiene valores relativamente bajos en las variables que ponderan con un signo positivo), mientras que el mayor valor es `r fmt(max(U[, 1]), 7)` (correspondiente a `r max1`, que tiene valores relativamente bajos en las variables que ponderan con un signo negativo). Para el componente 2, el menor valor es `r fmt(min(U[, 2]), 7)` (`r min2`) y el mayor es `r fmt(max(U[, 2]), 7)` (`r max2`). La media de cada componente es 0 y su varianza es igual al autovalor respectivo (`r fmt(var(U[, 1]), 7)` y `r fmt(var(U[, 2]), 7)`).
+
+```{r ej6-valida}
+res <- as.data.frame(read_dta(file.path(datos, "Base_resultados.dta")))
+c(`Correlación con u1 de Stata` = cor(U[, 1], res$u1), `Correlación con u2 de Stata` = cor(U[, 2], res$u2))
+```
+
+(Las puntuaciones coinciden con las que Stata guardó en `Base_resultados.dta`, a menos del signo del componente, que es arbitrario.)
+
+
+# Ejercicio 7
+
+*Realizar un gráfico biplot para la representación conjunta de filas y columnas (equivalente a observaciones y variables) de la matriz de datos y describir los resultados obtenidos en términos de la distribución de las observaciones (países) en el subespacio de las primeras dos componentes.*
+
+```{r ej7, fig.height = 7.5, fig.width = 9}
+bp7 <- biplot_svd(X, 0.5, base$country, "Biplot sobre matriz de datos (c = 0.5)\n(basado en matriz de correlaciones)",
+                  orient = c("IT_NET_USER_ZS", "EG_ELC_ACCS_ZS"))
+```
+
+Por lo tanto, se puede observar que:
+
+- Haití tiene un valor negativo muy alto en ambos componentes principales;
+- Antigua y Barbuda y Bahamas tienen un valor positivo muy alto en el componente 1 y negativo muy alto en el componente 2;
+- Brasil tiene un valor positivo muy alto en el componente 2 y un valor positivo no muy alto en el componente 1; y
+- el resto de los países tienen valores más cercanos al origen de este subespacio de estas primeras dos componentes.
+
+```{r ej7-verif}
+z <- scale(U)
+extremos <- data.frame(País = base$country, u1 = U[, 1], u2 = U[, 2])
+extremos[order(-abs(z[, 1]) - abs(z[, 2]))[1:5], ]
+```
+
+(La tabla lista los cinco países más alejados del origen en el plano de los dos primeros componentes, lo que confirma la descripción.)
+
+
+# Ejercicio 8
+
+*Utilizando la representación biplot adecuada, calcular una aproximación de dimensión 2 para la matriz de varianzas y covarianzas (o matriz de correlaciones, según corresponda) original e interpretar los resultados obtenidos.*
+
+Se aplica el biplot sobre la matriz de correlaciones $C$ (filas = variables, columnas = variables), y se calcula la aproximación de rango 2 de la matriz estandarizada:
+
+```{r ej8, fig.height = 7.5, fig.width = 9}
+bp8 <- biplot_svd(C, 0.5, colnames(C), "Biplot sobre matriz de correlaciones (c = 0.5)",
+                  orient = c("IT_NET_USER_ZS", "NY_GDP_MKTP_KD"))
+```
+
+```{r ej8-aprox}
+Z8 <- scale(C); s8 <- svd(Z8)
+Zhat <- s8$u[, 1:2] %*% diag(s8$d[1:2]) %*% t(s8$v[, 1:2])
+C_hat <- sweep(sweep(Zhat, 2, attr(Z8, "scaled:scale"), "*"), 2, attr(Z8, "scaled:center"), "+")
+dimnames(C_hat) <- dimnames(C)
+tabla(C_hat, d = 3)
+c(`Proporción de la variabilidad de C aproximada (rango 2)` = sum(s8$d[1:2]^2) / sum(s8$d^2),
+  `Error absoluto medio (|C - C_hat|)` = mean(abs(C - C_hat)))
+```
+
+Por lo tanto, se puede observar que la dirección y la longitud de las flechas coinciden, en gran medida, con el valor de la observación correspondiente.
+
+> *Nota: el biplot de una matriz de correlaciones es simétrico (las filas y las columnas son las mismas variables), por lo que cada variable aparece como un punto y como una flecha. La aproximación de rango 2 reproduce `r fmt(100 * sum(s8$d[1:2]^2) / sum(s8$d^2), 4)`% de la variabilidad de la matriz estandarizada (error absoluto medio de `r fmt(mean(abs(C - C_hat)), 3)` por elemento de la matriz de correlaciones), de modo que las correlaciones entre variables se pueden leer en el gráfico como el coseno del ángulo entre flechas (flechas con la misma dirección, correlación positiva alta; opuestas, negativa).*
+
+
+# Ejercicio 9
+
+*Realizar un análisis de clusters para hallar la jerarquía de agrupación de los países considerados en la matriz de datos, en base a la información de las dos primeras componentes principales. Utilizar dos métodos distintos (se puede elegir entre los encadenamientos simple, completo, promedio, etc.).*
+
+Test F de reducción de variabilidad para el algoritmo de k-medias sobre los dos primeros componentes:
+
+```{r ej9-test}
+Uc <- as.data.frame(U[, c(2, 1)])
+test9 <- as.data.frame(t(sapply(1:5, function(k) kmedtest(Uc, k))), check.names = FALSE)
+tabla(test9, d = 4)
+```
+
+Siguiendo la regla empírica de añadir un grupo más si el estadístico F de reducción de variabilidad es mayor que 10, se elegiría `r if (test9[1, "Estadístico F"] > 10) "al menos más de un grupo" else "un solo grupo"`. Para darle más sentido al presente análisis de clusters, se generarán dos grupos.
+
+En primer lugar, se realiza un análisis de clusters empleando el algoritmo de las k-medias.
+
+```{r ej9-km}
+set.seed(10)
+km9 <- kmeans(Uc, centers = 2, nstart = 25)
+grupo9 <- km9$cluster
+# Se numera el grupo 1 como el más numeroso
+if (sum(grupo9 == 1) < sum(grupo9 == 2)) grupo9 <- 3 - grupo9
+plot(U[, 1], U[, 2], pch = 19, col = c(azul, rojo)[grupo9], xlim = c(-6, 6), ylim = c(-4, 4),
+     main = "Análisis de clusters con algoritmo k-medias", xlab = "Componente 1", ylab = "Componente 2")
+legend("topright", legend = c("Grupo 1", "Grupo 2"), pch = 19, col = c(azul, rojo))
+table(Grupo = grupo9)
+base$country[grupo9 == 2]
+```
+
+En segundo lugar, se realiza un análisis de clusters empleando métodos jerárquicos, trabajando con dos medidas de distancias entre clusters (*singlelinkage* y *averagelinkage*).
+
+
+# Ejercicio 10
+
+*En cada caso, realizar una representación gráfica de los resultados obtenidos utilizando un dendrograma.*
+
+```{r ej10, fig.height = 5}
+d_u <- dist(Uc)
+hc_single <- hclust(d_u, "single"); hc_avg <- hclust(d_u, "average")
+for (par in list(list(hc_single, "singlelinkage"), list(hc_avg, "averagelinkage"))) {
+  plot(par[[1]], labels = base$country, hang = -1, xlab = "", sub = "", cex = 0.7,
+       ylab = "L2 dissimilarity measure",
+       main = paste0("Dendrograma para análisis de clusters con método jerárquico ", par[[2]]))
+}
+```
+
+```{r ej10-res}
+corte_single <- cutree(hc_single, 2); corte_avg <- cutree(hc_avg, 2)
+tabla(data.frame(Método = c("singlelinkage", "averagelinkage"),
+                 `Altura de la última fusión` = c(max(hc_single$height), max(hc_avg$height)),
+                 `Altura de la penúltima fusión` = c(sort(hc_single$height, TRUE)[2], sort(hc_avg$height, TRUE)[2]),
+                 `Grupos (n)` = c(paste(sort(table(corte_single)), collapse = " / "), paste(sort(table(corte_avg)), collapse = " / ")),
+                 check.names = FALSE), d = 4)
+haiti_solo <- function(corte) sum(corte == corte[base$country == "Haiti"]) == 1
+```
+
+# Ejercicio 11
+
+*Interpretar los resultados obtenidos tomando en cuenta el gráfico biplot que se realizó para resolver las últimas consignas de la primera parte del examen.*
+
+Con ambos métodos jerárquicos (como así también con el algoritmo de las k-medias), si se consideran dos grupos, se tendría un grupo conformado por Haití y otro grupo conformado por el resto de los países en la matriz de datos (verificación: Haití queda solo con *singlelinkage*: `r haiti_solo(corte_single)`; con *averagelinkage*: `r haiti_solo(corte_avg)`; con k-medias: `r sum(grupo9 == grupo9[base$country == "Haiti"]) == 1`). Tomando en cuenta el gráfico biplot, lo que se pudo observar es que Haití tiene un valor negativo muy alto en las dos primeras componentes principales, respecto al resto de los países, pudiendo considerarse una observación atípica en la matriz de datos, con lo cual es razonable que esta observación no sea agrupada con otra/s y que, por sí sola, conforme un grupo.
+
+En el dendrograma, la altura de las líneas verticales y el ancho de las líneas horizontales dan pistas visuales sobre la fuerza de la agrupación. En particular, las líneas verticales más largas indican grupos con observaciones más disímiles, mientras que las más cortas indican grupos con observaciones menos disímiles; las líneas horizontales más anchas indican grupos más distintos, mientras que las más angostas indican grupos más parecidos. Por lo tanto, el análisis vertical da cuenta de que tan distintos son los países en los grupos (lo que se puede interpretar como variabilidad intra grupo), mientras que el análisis horizontal da cuenta de que tan distintos son los grupos (lo que se puede interpretar como variabilidad inter grupos).
+
+Teniendo en cuenta lo anterior, entonces, se puede mencionar que, con el método jerárquico *singlelinkage* (versus el *averagelinkage*), en general, se observan líneas verticales más cortas y líneas horizontales más angostas, indicando una menor variabilidad intra e inter grupo, respectivamente.
+
+> **⚠ Anotación (la comparación entre métodos no es una comparación de variabilidad):** las alturas de un dendrograma dependen de la definición de distancia entre clusters de cada método: en *singlelinkage* es la **mínima** distancia entre dos observaciones (siempre la menor posible) y en *averagelinkage* es la distancia **promedio**, por lo que, para los mismos datos, las alturas de *singlelinkage* son por construcción menores (la última fusión es de `r fmt(max(hc_single$height), 3)` frente a `r fmt(max(hc_avg$height), 3)`). Que las líneas sean más cortas con *singlelinkage* refleja esa definición y su tendencia a "encadenar" observaciones, no necesariamente una menor variabilidad real intra e inter grupos; los datos son los mismos. Lo que sí es cierto es que, con ambos métodos, el último corte separa a una única observación (Haití) del resto.
+
+
+# Ejercicio 12
+
+*Resumir, brevemente, las principales conclusiones del análisis.*
+
+Las principales conclusiones del análisis son:
+
+- con ambos métodos jerárquicos, Haití, por sí solo, conforma un grupo.
+- con el método jerárquico *singlelinkage*, respecto al *averagelinkage*, hay una menor variabilidad intra e inter grupo (ver la anotación del Ejercicio 11: la diferencia de alturas se debe, en parte, a la definición de cada método).
+
+> *Nota: además, el análisis muestra que el primer componente se interpreta como un eje de desarrollo (mayor acceso a Internet y electricidad, mayores emisiones y PIB per cápita, y menor dependencia demográfica y saldo de cuenta corriente) y que el segundo distingue la escala de la economía y el gasto público (PIB, consumo del gobierno, saldo de cuenta corriente) de la inversión y el ingreso per cápita (formación de capital, PIB per cápita, emisiones). Estas conclusiones son una síntesis propia a partir de los ejercicios 5 y 7; el PDF solo incluye los dos puntos de arriba.*
+
+
+# Ejercicio 13
+
+*Efectuar un análisis factorial para describir la variabilidad común entre las variables de la matriz de datos. El punto de partida será un modelo con un solo factor.*
+
+En primer lugar, se procede a realizar tests de normalidad multivariada:
+
+```{r ej13-norm}
+tabla_mv(mv_normalidad(X))
+```
+
+Por lo tanto, con un nivel de significancia del 1% (excepto con el test Mardia mKurtosis), estos datos aportan evidencia suficiente para indicar que no tienen una distribución normal multivariada.
+
+A continuación, se realiza un análisis factorial (con un factor) para describir la variabilidad común entre las variables de la matriz de datos:
+
+```{r ej13-fa}
+fa1 <- analisis_factorial(X, 1, ref = 4)
+tabla(tabla_pca(fa1$f$ev), d = 5)
+lr <- lr_independencia(X)
+```
+
+LR test: independent vs. saturated: chi2(`r lr$df`) = `r fmt(lr$chi2, 6)`, Prob > chi2 = `r fmt(lr$p, 4)`.
+
+```{r ej13-cargas}
+tabla(cbind(fa1$L, Uniqueness = fa1$psi), d = 4)
+```
+
+**Comunalidad de las variables en el modelo factorial con un factor:**
+
+```{r ej13-com}
+tabla(data.frame(Variable = vars, Comunalidad = fa1$com), d = 8)
+```
+
+**Análisis de los residuos en el modelo factorial con un factor:**
+
+```{r ej13-resid}
+tabla_mv(mv_normalidad(fa1$resid_do))
+tabla_mv(mv_diagonalidad(fa1$resid_do))
+```
+
+Por lo tanto, con un nivel de significancia del 1% (excepto con el test Mardia mKurtosis), estos datos aportan evidencia suficiente para indicar que los residuos no tienen una distribución normal multivariada. Además, con un nivel de significancia del 1%, estos datos aportan evidencia suficiente para indicar que la matriz de varianzas y covarianzas de los residuos no es diagonal, por lo que se debería aumentar el número de factores hasta que los residuos estimados verifiquen la hipótesis nula.
+
+```{r ej13-anot-resid, include=FALSE}
+dh_do <- mv_normalidad(fa1$resid_do)[4, "Estadístico"]; dh_std <- mv_normalidad(fa1$resid_std)[4, "Estadístico"]
+dg_do <- mv_diagonalidad(fa1$resid_do)[["Estadístico"]]; dg_std <- mv_diagonalidad(fa1$resid_std)[["Estadístico"]]
+```
+
+> *Nota metodológica (igual que en el Problem Set 5):* el do-file resta $\hat{F}\Lambda'$ (estimado con variables estandarizadas) a las variables solo **centradas**, de modo que los residuos mezclan escalas. Con los residuos estandarizados ($Z - \hat{F}\Lambda'$) los tests de Mardia y Henze-Zirkler no cambian, pero sí el de Doornik-Hansen (`r fmt(dh_do, 6)` con el cálculo del PDF frente a `r fmt(dh_std, 6)`) y el de diagonalidad (`r fmt(dg_do, 6)` frente a `r fmt(dg_std, 6)`); las conclusiones no cambian.
+
+**Estadísticos de bondad del ajuste en el modelo factorial con un factor:**
+
+```{r ej13-bondad}
+tabla(data.frame(Variable = vars, `rho2 = 1 - psi^2 (PDF)` = fa1$rho2, `Comunalidad = 1 - psi` = fa1$com, check.names = FALSE), d = 8)
+```
+
+Coeficiente de determinación = `r fmt(fa1$r2, 8)`.
+
+> **⚠ Anotación (dos problemas con las medidas de bondad de ajuste del PDF):**
+>
+> 1. **rho2:** el do-file calcula $\rho_i^2 = 1 - \psi_i^2$, elevando la unicidad al cuadrado; el cuadrado de la correlación múltiple entre la variable $i$ y el factor es, en cambio, la comunalidad $1 - \psi_i$ (columna de la derecha). Por ejemplo, para `BN_CAB_XOKA_GD_ZS` el PDF informa `r fmt(fa1$rho2[1], 5)`, pero la comunalidad es `r fmt(fa1$com[1], 5)`; para `NY_GDP_MKTP_KD`, `r fmt(fa1$rho2[7], 5)` frente a `r fmt(fa1$com[7], 5)`. Los valores del PDF sobrestiman el ajuste.
+> 2. **Coeficiente de determinación negativo:** el valor de `r fmt(fa1$r2, 8)` es **negativo**, lo cual no es posible para un coeficiente de determinación. Ocurre porque $\det(\Psi) > \det(R)$ (la matriz de varianzas únicas es "más grande" que la matriz de correlaciones muestrales en términos del determinante), con lo cual el cociente es mayor que 1: con un solo factor, la parte no explicada $\Psi$ no resulta menor que la varianza total en el sentido del determinante. El informe lo reporta sin comentarlo; un valor negativo indica que esta medida no es interpretable para el modelo de un factor y que el ajuste es malo (coherente con la comunalidad promedio de `r fmt(mean(fa1$com), 3)` y con el rechazo de la diagonalidad de los residuos).
+
+
+# Ejercicio 14
+
+*Estimar la matriz de varianzas y covarianzas que surge del modelo factorial, la cual se descompone en varianza común (debido a los factores) y varianza específica. Comparar estos resultados con respecto a la matriz S de varianzas y covarianzas muestral.*
+
+**Matriz de correlaciones muestrales:**
+
+```{r ej14-C}
+tabla(C, d = 4)
+```
+
+**Matriz de varianzas y covarianzas en el modelo factorial con un factor** ($\hat{\Sigma} = \Lambda\Lambda' + \Psi$, redondeada a 4 decimales; como las variables están estandarizadas, es una matriz de correlaciones):
+
+```{r ej14-hat}
+Sig1 <- round(fa1$Sigma_hat, 4); dimnames(Sig1) <- dimnames(C)
+tabla(Sig1, d = 4)
+err1 <- mean(abs((fa1$Sigma_hat - C)[upper.tri(C)]))
+```
+
+Por lo tanto, se puede observar que, con un factor, las correlaciones estimadas y muestrales no son tan parecidas (error absoluto medio de `r fmt(err1, 4)` en los elementos fuera de la diagonal).
+
+
+# Ejercicio 15
+
+*Repetir los dos ejercicios anteriores agregando un nuevo factor al modelo. ¿Se producen cambios en las comunalidades de las variables con respecto al modelo estimado en el Ejercicio 13? Determinar cuál de las dos especificaciones del modelo factorial (m = 1 o m = 2) resulta más adecuada para representar la estructura de asociación entre las variables. Es posible que, en función de las variables y/o países elegidos en la matriz de datos, la especificación del modelo factorial con dos factores no sea la óptima. En ese caso, agregar los comentarios que creas convenientes.*
+
+A continuación, se realiza un análisis factorial (con dos factores) para describir la variabilidad común entre las variables de la matriz de datos:
+
+```{r ej15-fa}
+fa2 <- analisis_factorial(X, 2, ref = c(4, 2))
+tabla(cbind(fa2$L, Uniqueness = fa2$psi), d = 4)
+```
+
+**Comunalidad de las variables en el modelo factorial con dos factores:**
+
+```{r ej15-com}
+tabla(data.frame(Variable = vars, `Comunalidad (m = 1)` = fa1$com, `Comunalidad (m = 2)` = fa2$com, check.names = FALSE), d = 8)
+```
+
+Por lo tanto, se producen cambios en las comunalidades de las variables con respecto al modelo estimado en el Ejercicio 13 (con un factor), aumentando en todos los casos (`r all(fa2$com > fa1$com)`), ya que, al considerar más factores, los valores de comunalidad son mayores (hay más variación de cada variable explicada por factores) y, en general, se explican mejor los datos, lo que se puede ver en el hecho de que la matriz de varianzas y covarianzas estimada con dos factores (versus la estimada con un factor) es más parecida a la matriz de varianzas y covarianzas muestral.
+
+**Análisis de los residuos en el modelo factorial con dos factores:**
+
+```{r ej15-resid}
+tabla_mv(mv_normalidad(fa2$resid_do))
+tabla_mv(mv_diagonalidad(fa2$resid_do))
+```
+
+Por lo tanto, con un nivel de significancia del 1% (excepto con el test Mardia mKurtosis), estos datos aportan evidencia suficiente para indicar que los residuos no tienen una distribución normal multivariada; y, con un nivel de significancia del 1%, que la matriz de varianzas y covarianzas de los residuos no es diagonal, por lo que se debería aumentar el número de factores hasta que los residuos estimados verifiquen la hipótesis nula.
+
+```{r ej15-anot-dh, include=FALSE}
+dh1_do <- mv_normalidad(fa1$resid_do)[4, "Estadístico"]; dh2_do <- mv_normalidad(fa2$resid_do)[4, "Estadístico"]
+```
+
+> **⚠ Anotación (el PDF repite la salida del modelo de un factor):** en el PDF, la tabla de normalidad de los residuos del modelo con **dos** factores es idéntica, número por número, a la del modelo con **un** factor (incluido Doornik-Hansen = 108,741). Los tests de Mardia y de Henze-Zirkler dan lo mismo en ambos modelos porque son invariantes ante transformaciones lineales de los datos (y los residuos de ambos modelos son transformaciones lineales de las mismas variables), pero el test de Doornik-Hansen no lo es: con los residuos del modelo de dos factores da `r fmt(dh2_do, 6)` y con los del modelo de un factor, `r fmt(dh1_do, 6)`. El test de diagonalidad del PDF (103,04 frente a 106,98) sí cambia entre modelos y coincide con el calculado aquí; la tabla de normalidad del modelo de dos factores del PDF parece, entonces, una repetición de la salida anterior. La conclusión (rechazo de la normalidad al 1%, salvo Mardia mKurtosis) no cambia.
+
+**Estadísticos de bondad del ajuste en el modelo factorial con dos factores:**
+
+```{r ej15-bondad}
+tabla(data.frame(Variable = vars, `rho2 = 1 - psi^2 (PDF)` = fa2$rho2, `Comunalidad = 1 - psi` = fa2$com, check.names = FALSE), d = 8)
+```
+
+Coeficiente de determinación = `r fmt(fa2$r2, 8)`.
+
+**Matriz de varianzas y covarianzas en el modelo factorial con dos factores:**
+
+```{r ej15-hat}
+Sig2 <- round(fa2$Sigma_hat, 4); dimnames(Sig2) <- dimnames(C)
+tabla(Sig2, d = 4)
+err2 <- mean(abs((fa2$Sigma_hat - C)[upper.tri(C)]))
+```
+
+Por lo tanto, se puede observar que, con dos factores, las correlaciones estimadas y muestrales son más parecidas (error absoluto medio de `r fmt(err2, 4)`, frente a `r fmt(err1, 4)` con un factor).
+
+**Selección entre m = 1 y m = 2** (modelos de máxima verosimilitud; AIC y BIC de `ftest.do`):
+
+```{r ej15-ic}
+ic <- bic_factores(X, 1:5)
+tabla(ic, d = 3)
+ic12 <- ic[ic$Factores <= 2, ]
+m_aic <- ic12$Factores[which.min(ic12$AIC)]; m_bic <- ic12$Factores[which.min(ic12$BIC)]
+```
+
+Por último, la especificación del modelo factorial que resulta más adecuada para representar la estructura de asociación entre las variables es, considerando el BIC (Bayesian Information Criterion), m = 1 y, considerando el AIC (Akaike Information Criterion), m = 2.
+
+```{r ej15-anot, include=FALSE}
+coincide <- (m_bic == 1 && m_aic == 2)
+```
+
+> *Verificación:* entre m = 1 y m = 2, el menor BIC corresponde a m = `r m_bic` y el menor AIC corresponde a m = `r m_aic`; `r if (coincide) "esto coincide con lo que dice el informe." else "esto NO coincide exactamente con lo que dice el informe (ver tabla)."` Como comentario adicional (el PDF no lo desarrolla): con solo n = `r n` observaciones y p = `r p` variables, el BIC penaliza fuertemente los parámetros adicionales, y varios de los países elegidos (por ejemplo, Antigua y Barbuda, Bahamas y Haití) son observaciones muy distintas del resto (ver Ejercicios 7 y 9), lo que puede distorsionar el modelo factorial de máxima verosimilitud; además, los residuos del modelo con dos factores siguen sin ser incorrelacionados, por lo que ninguna de las dos especificaciones es completamente satisfactoria.
+
+
+# Ejercicio 16
+
+*Interpretar, brevemente, los resultados obtenidos, tomando en cuenta las eventuales diferencias y semejanzas con los resultados del cálculo de componentes principales.*
+
+En primer lugar, se recuerdan los resultados obtenidos tanto en el análisis de componentes principales como en el análisis factorial.
+
+**Análisis de componentes principales (2 componentes):**
+
+```{r ej16-pca}
+unexpl <- 1 - rowSums(sweep(pc$V[, 1:2]^2, 2, pc$ev[1:2], "*"))
+tabla(cbind(pc$V[, 1:2], Unexplained = unexpl), d = 4)
+```
+
+**Análisis factorial (2 factores):**
+
+```{r ej16-fa}
+tabla(cbind(fa2$L, Uniqueness = fa2$psi), d = 4)
+```
+
+Por lo tanto, se puede observar que:
+
+- el signo de los componentes principales y de los factores asociados a cada una de las variables es el mismo; y
+- el valor absoluto de los factores asociados a cada una de las variables es mayor al de los componentes principales.
+
+Siendo así, al igual que en el caso del análisis de componentes principales, se tiene que:
+
+- el primer factor tomará valores altos en aquellos países en donde las variables "Age dependency ratio (% of working-age population)" y "Current account balance (% of GDP)" resulten menos importantes, en términos relativos, a las restantes; y
+- el segundo factor tomará valores altos en aquellos países en donde las variables que ponderan con un signo positivo en el autovector (mencionadas en el Ejercicio 5) resulten más importantes, en términos relativos, a las restantes.
+
+```{r ej16-anot}
+carga_pca <- sweep(pc$V[, 1:2], 2, sqrt(pc$ev[1:2]), "*")     # autovector * raíz del autovalor
+colnames(carga_pca) <- c("Carga PCA 1", "Carga PCA 2")
+tabla(cbind(carga_pca, fa2$L), d = 4)
+mismo_signo <- all(sign(carga_pca) == sign(fa2$L))
+mayor_abs <- mean(abs(fa2$L) > abs(pc$V[, 1:2]))
+mayor_abs_esc <- mean(abs(fa2$L) > abs(carga_pca))
+dif_max <- max(abs(abs(carga_pca) - abs(fa2$L)))
+dif_med <- median(abs(abs(carga_pca) - abs(fa2$L)))
+```
+
+> **⚠ Anotación (la comparación del PDF es entre magnitudes que no están en la misma escala):** el informe compara las cargas del análisis factorial con los **autovectores** del análisis de componentes principales, que tienen norma 1 por construcción; las cargas factoriales, en cambio, están escaladas por la raíz del autovalor ($\sqrt{\lambda_k}$, la correlación entre la variable y el componente). Por eso las cargas factoriales parecen "mayores" en valor absoluto: lo son en `r fmt(100 * mayor_abs, 3)`% de los casos si se compara con los autovectores, pero solo en `r fmt(100 * mayor_abs_esc, 3)`% de los casos si se comparan con las cargas del PCA en la misma escala (autovector $\times \sqrt{\lambda_k}$; tabla de arriba). En esa escala, las cargas de ambos análisis son parecidas (la diferencia mediana en valor absoluto es de `r fmt(dif_med, 3)` y la mayor, de `r fmt(dif_max, 3)`), `r if (mismo_signo) "con el mismo signo en todos los casos" else "con signos que difieren en algunos casos"`; las diferencias que quedan se deben a que el análisis factorial por factores principales parte de una matriz de correlaciones con las comunalidades estimadas en la diagonal (en lugar de unos). La semejanza entre ambos métodos es entonces mayor de lo que sugiere la comparación del informe, y la diferencia principal es conceptual: el PCA explica la varianza **total** de las variables (las "Unexplained" del PCA) y el análisis factorial solo la varianza **común** (las unicidades).

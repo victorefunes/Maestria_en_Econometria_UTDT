@@ -1,0 +1,501 @@
+---
+title: "Trabajo Práctico N° 4 — Extensiones de Diferencias en Diferencias"
+subtitle: "Microeconometría II · Maestría en Econometría UTDT"
+lang: es
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+---
+
+```{r setup, include=FALSE}
+# error = TRUE: si un chunk falla (por ejemplo, falta un paquete), el documento
+# igual se genera y muestra el error en ese lugar.
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, error = TRUE)
+```
+
+Este documento combina, para cada inciso: **(P)** el enunciado (`Trabajo Práctico N° 4 (P).pdf`), **(R)** la resolución de `Trabajo Práctico N° 4 (R).pdf` (con las salidas de Stata) y el **código en R** (`Datos/Trabajo Práctico N° 4.R`, convertido desde el `.do`). Para este TP **no hay** PDF `(S)` con solución oficial.
+
+> ⚠️ **DISCREPANCIA** marca todo lo que no coincide o falta entre enunciado, resolución y código.
+> ✅ marca lo que verifiqué y está bien.
+> 💡 marca una **propuesta mía** (no está en los PDFs) para completar lo que falta.
+> El código **no se ejecutó** (R no está disponible en esta máquina). Los números de Stata vienen de (R).pdf; los chequeos de consistencia son cuentas hechas a mano con esos números.
+> Las rutas de los chunks son relativas a la carpeta de este documento (`Datos/...`).
+
+---
+
+## Resumen de discrepancias
+
+| # | Dónde | Qué pasa | Gravedad |
+|---|-------|----------|----------|
+| 1 | Enunciado (P), Ej. 1 (b) y 2 (a) | Dice "la unidad **2** tratada en el período 2"; debe ser la unidad **3** (la 2 ya está tratada en el período 1). (R) usa la unidad 3. | Baja |
+| 2 | Ej. 1 (c), (R) | La fórmula de $\hat\beta_{post}$ está **incompleta**: el numerador es $\sum(D_{it}-\hat D_{it})$ y le falta multiplicar por $Y_{it}$; además $\hat D_{it}$ no está definido. | Alta |
+| 3 | Ej. 1 (d), (R) | Respuesta parcial: solo menciona heterogeneidad. No menciona los **pesos negativos / comparaciones "prohibidas"** (tratados tempranos como control de tratados tardíos), que es el problema central del TWFE con adopción escalonada. | Media |
+| 4 | Ej. 1 (e), (R) | Muestra la salida (D = −0,0225) **sin interpretarla**. | Media |
+| 5 | Ej. 2 (b), (R) | **No responde "¿por qué se normaliza β₀ = 0?"** (colinealidad perfecta). Además, la regresión normaliza el **trimestre 3** (r = −1, el último previo al tratamiento), no r = 0 como dice el enunciado. | Media |
+| 6 | Ej. 2 (d), (R) | Concluye "el diseño está bien hecho" porque los placebos no son significativos. Es una conclusión demasiado fuerte (pocos períodos, no rechazar no es probar) y en el event study el coeficiente del trimestre 2 **sí es significativo** (+0,0063; p = 0,010). | Media |
+| 7 | Ej. 3 (b), (R) | Solo muestra el test de pre-tendencias (χ²(5) = 7,79; p = 0,168). **Falta la reflexión pedida**: plausibilidad de tendencias paralelas, factores comunes a los estados tratados, niveles vs. logaritmos. | Alta |
+| 8 | Ej. 3 (d), (R) | El efecto agregado **por grupos con covariable repite exactamente** el de (c) (G2004 = −0,0797; G2006 = −0,0229; G2007 = −0,0261), pero no es consistente con los ATT(g,t) de (d): promediándolos da −0,0846; −0,0202; −0,0288. Probable error de copia. | Alta |
+| 9 | Ej. 3 (e), (R) | El test de pre-tendencias "sin covariables, no tratados todavía" da **exactamente** χ²(5) = 7,7912 y p = 0,1681, igual que con nunca tratados, aunque los ATT pre-tratamiento de ambas tablas son distintos. Probable copia. | Media |
+| 10 | Ej. 3 (e), (R) | La pregunta "¿Se observan cambios?" **no tiene respuesta** (los cambios son mínimos: ATT simple −0,0400 vs −0,0398). | Media |
+| 11 | Ej. 3 (f), (R) | **Sin comparación** con TWFE. Los números sí permiten una: TWFE estático −0,0365 vs CS −0,0400; y el TWFE dinámico muestra pre-coeficientes significativos (Tm3, Tm2) que CS no detecta (Pre_avg p = 0,81). Además el `.do` normaliza r = 0 en vez de r = −1. | Alta |
+| 12 | Ej. 4, (R) | Solo muestra la salida de `jwdid`. **Faltan los `estat simple/group/calendar/event`** que corre el `.do`, así que no se puede comparar con `csdid` como pide "replicar el ejercicio anterior". | Media |
+| 13 | Ej. 4, (R) | `jwdid` con no tratados todavía **no coincide con `csdid`** en algunos ATT (p. ej. ATT(2007,2007): −0,0431 vs −0,0261). (R) no lo comenta. | Baja |
+
+---
+
+## Ejercicio 1 — Static Two-Way Fixed Effects
+
+**(P)** Con $Y_{it}=\alpha_i+\phi_t+D_{it}\beta_{post}+\epsilon_{it}$ (1), donde $\alpha_i$ son efectos fijos por individuo y $\phi_t$ efectos fijos temporales.
+
+> ⚠️ **DISCREPANCIA #1 (enunciado).** En (b) dice "la unidad 2 tratada en el período 1, la unidad **2** tratada en el período 2". Debe ser la unidad **3** en el segundo caso.
+
+### (a) ¿Cómo debe definirse $D_{it}$ para generalizar el DiD 2×2?
+
+**(R)** $D_{it}=\mathbb{1}\{i\text{ tratado}\}\cdot\mathbb{1}\{t\ge\text{fecha de otorgamiento}\}$. ✅ Correcto.
+
+### (b) La variable con T = 3 y N = 3 (unidad 1 sin tratar, unidad 2 tratada en t = 1, unidad 3 tratada en t = 2)
+
+**(R)**
+
+| id | t | Cuándo | $D_i$ | $D_{it}$ |
+|---|---|---|---|---|
+| 1 | 1 | 0 | 0 | 0 |
+| 1 | 2 | 0 | 0 | 0 |
+| 1 | 3 | 0 | 0 | 0 |
+| 2 | 1 | 1 | 1 | 1 |
+| 2 | 2 | 1 | 1 | 1 |
+| 2 | 3 | 1 | 1 | 1 |
+| 3 | 1 | 2 | 1 | 0 |
+| 3 | 2 | 2 | 1 | 1 |
+| 3 | 3 | 2 | 1 | 1 |
+
+✅ **Verificado:** la tabla es correcta (la unidad 3 queda sin tratar en t = 1 y tratada desde t = 2).
+
+### (c) Expresión del estimador de $\beta_{post}$
+
+**(R)** $\hat\beta_{post}=\dfrac{\sum_{i,t}(D_{it}-\hat D_{it})}{\sum_{i,t}(D_{it}-\hat D_{it})^2}$.
+
+> ⚠️ **DISCREPANCIA #2.** Por Frisch-Waugh-Lovell, el estimador con efectos fijos de individuo y tiempo es
+>
+> $$\hat\beta_{post}=\frac{\sum_{i,t}\tilde D_{it}\,Y_{it}}{\sum_{i,t}\tilde D_{it}^2},\qquad \tilde D_{it}=D_{it}-\bar D_{i\cdot}-\bar D_{\cdot t}+\bar D_{\cdot\cdot}$$
+>
+> (el residuo de regresar $D_{it}$ en los efectos fijos; en un panel balanceado $\hat D_{it}=\bar D_{i\cdot}+\bar D_{\cdot t}-\bar D_{\cdot\cdot}$). A la fórmula de (R) le **falta $Y_{it}$ en el numerador** (sin eso no depende de los datos del resultado) y no define $\hat D_{it}$.
+
+```{r ej1-fwl}
+# AGREGADO (no está en el .R original): verifica la fórmula de FWL con el ejemplo T = N = 3
+# (unidad 1 nunca tratada, unidad 2 tratada en t = 1, unidad 3 tratada en t = 2).
+set.seed(1)
+d <- data.frame(id = rep(1:3, each = 3), t = rep(1:3, times = 3))
+d$D <- c(0,0,0,  1,1,1,  0,1,1)
+d$y <- rnorm(9)
+
+# D residualizado por los efectos fijos (panel balanceado)
+d$Dtil <- d$D - ave(d$D, d$id) - ave(d$D, d$t) + mean(d$D)
+
+beta_fwl <- sum(d$Dtil * d$y) / sum(d$Dtil^2)
+beta_lm  <- coef(lm(y ~ D + factor(id) + factor(t), data = d))[["D"]]
+all.equal(beta_fwl, beta_lm)   # TRUE
+```
+
+### (d) ¿Cuándo es bueno para recuperar el ATT? ¿Qué problemas tiene?
+
+**(R)** Sería bueno si todas las unidades tienen el mismo efecto y éste es idéntico sin importar cuánto pasó desde el inicio del tratamiento. El problema: heterogeneidad del efecto entre unidades y a lo largo del tiempo desde el tratamiento.
+
+> ⚠️ **DISCREPANCIA #3.** Falta el punto principal de la literatura (Goodman-Bacon, de Chaisemartin y D'Haultfœuille): con adopción escalonada y efectos heterogéneos, $\hat\beta_{post}$ es un promedio ponderado de DiD 2×2 que **usa a los ya tratados como controles** y algunos **pesos pueden ser negativos**, por lo que puede tener signo contrario al ATT aun si todos los efectos individuales tienen el mismo signo. Eso es lo que motiva a Callaway y Sant'Anna (Ej. 3).
+
+### (e) Estimar $\beta_{post}$ con `organ_donations.dta` (Kessler y Roth, 2014)
+
+**(R)** Salida de `reghdfe rate D, absorb(state quarter) vce(cluster state)` (N = 162, 27 estados, R² = 0,9793):
+
+| Variable | Coef. | EE robusto | t | P>\|t\| | IC 95% |
+|---|---|---|---|---|---|
+| D | **−0,022459** | 0,0061312 | −3,66 | 0,001 | [−0,0350619; −0,0098561] |
+| _cons | 0,4454641 | 0,0001135 | 3923,36 | 0,000 | [0,4452307; 0,4456974] |
+
+> ✅ **Verificado:** N = 27 estados × 6 trimestres = 162. El tratamiento es California en los trimestres 4 a 6 (Q3 2011 a Q1 2012).
+>
+> ⚠️ **DISCREPANCIA #4.** (R) no interpreta. 💡 **Interpretación sugerida (mía):** después del cambio de política (pasar a "prompted choice" en California), la tasa de donantes registrados de California cae **2,2 puntos porcentuales** respecto de los demás estados (la tasa media ronda 0,445), significativo al 1%. El `.do` además corre `xtreg rate i.quarter_num D, fe`, que no aparece en el PDF.
+
+```{r ej1-e}
+library(haven)
+library(fixest)
+library(did)
+library(etwfe)
+
+leer <- function(archivo) as.data.frame(zap_labels(read_dta(archivo)))
+
+org <- leer("Datos/organ_donations.dta")
+str(org)
+
+org$state_id <- as.integer(factor(org$state))
+
+org$Treated <- as.numeric(org$state == "California")
+org$Post <- as.numeric(org$quarter %in% c("Q32011", "Q42011", "Q12012"))
+org$D <- org$Treated * org$Post
+
+print(table(org$D))
+print(table(org$state, org$D))
+print(table(org$quarter_num, org$D))
+
+# reghdfe rate D, absorb(state quarter) vce(cluster state)
+print(summary(feols(rate ~ D | state + quarter, data = org, cluster = ~state)))
+
+# xtreg rate i.quarter_num D, fe
+print(summary(feols(rate ~ factor(quarter_num) + D | state_id, data = org, vcov = "iid")))
+```
+
+---
+
+## Ejercicio 2 — Dynamic Two-Way Fixed Effects
+
+**(P)** $Y_{it}=\alpha_i+\phi_t+\sum_{r\ne0,\,-\underline T\le r\le\bar T}\mathbb{1}[R_{it}=r]\,\beta_r+\epsilon_{it}$.
+
+### (a) Las variables con T = 3 y N = 3
+
+**(R)**
+
+| id | t | Cuándo | $D_i$ | $D_{it}$ | t(−1) | t(0) | t(+1) | t(+2) |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| 1 | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| 1 | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| 2 | 1 | 1 | 1 | 1 | 0 | 1 | 0 | 0 |
+| 2 | 2 | 1 | 1 | 1 | 0 | 0 | 1 | 0 |
+| 2 | 3 | 1 | 1 | 1 | 0 | 0 | 0 | 1 |
+| 3 | 1 | 2 | 1 | 0 | 1 | 0 | 0 | 0 |
+| 3 | 2 | 2 | 1 | 1 | 0 | 1 | 0 | 0 |
+| 3 | 3 | 2 | 1 | 1 | 0 | 0 | 1 | 0 |
+
+✅ **Verificado:** con $R_{it}=t-\text{(período de tratamiento)}$, la unidad 2 (tratada en t = 1) tiene r = 0, 1, 2 y la unidad 3 (tratada en t = 2) tiene r = −1, 0, 1. Correcto. (⚠️ #1: el enunciado repite el typo de la unidad 2.)
+
+### (b) Efectos dinámicos $\beta_r$ y por qué se normaliza $\beta_0=0$
+
+**(R)** Salida de `reghdfe rate California##ib3.quarter_num, absorb(state quarter_num) vce(cluster state)` (N = 162, 27 estados). Los trimestres 1 a 6 corresponden a Q4 2010, Q1 2011, Q2 2011, Q3 2011, Q4 2011 y Q1 2012; el tratamiento empieza en el trimestre 4.
+
+| California × trimestre | Coef. | EE | t | P>\|t\| | IC 95% |
+|---|---|---|---|---|---|
+| 1 (Q4 2010) | −0,0029423 | 0,0050842 | −0,58 | 0,568 | [−0,013393; 0,0075084] |
+| 2 (Q1 2011) | 0,0062961 | 0,0022658 | 2,78 | 0,010 | [0,0016388; 0,0109535] |
+| 3 (Q2 2011) | base | | | | |
+| 4 (Q3 2011) | −0,0215654 | 0,0050337 | −4,28 | 0,000 | [−0,0319124; −0,0112184] |
+| 5 (Q4 2011) | −0,0202923 | 0,0044733 | −4,54 | 0,000 | [−0,0294874; −0,0110973] |
+| 6 (Q1 2012) | −0,0221654 | 0,0100132 | −2,21 | 0,036 | [−0,0427479; −0,0015829] |
+
+> ⚠️ **DISCREPANCIA #5.** (a) (R) **no contesta el "¿por qué?"**. 💡 **Respuesta (mía):** con efectos fijos de individuo y de tiempo, incluir **todos** los indicadores de tiempo relativo genera colinealidad perfecta, así que hay que fijar uno en cero (la normalización identifica los demás coeficientes **respecto de ese período**). (b) El enunciado habla de normalizar $\beta_0$ (r = 0, el primer período tratado), pero la regresión de (R) usa el **trimestre 3** como base, que es **r = −1** (el último previo al tratamiento), lo habitual en event studies. Los coeficientes se leen entonces como diferencia contra Q2 2011, y el coeficiente del trimestre 4 (r = 0) **no es cero** (−0,0216).
+
+> ✅ **Verificado:** el efecto estático de (1.e) se puede reconstruir con estos coeficientes: promedio de los post (−0,0213410) menos el promedio de los tres pre (incluida la base en 0): $(-0{,}0029423+0{,}0062961+0)/3=0{,}0011179$, y $-0{,}0213410-0{,}0011179=-0{,}0224589\approx-0{,}022459$ ✓.
+
+```{r ej2-b}
+# INCISO (b)
+org$California <- as.numeric(org$state == "California")
+
+# California##ib3.quarter_num (trimestre 3 como base)
+es <- feols(rate ~ i(quarter_num, California, ref = 3) | state + quarter_num,
+            data = org, cluster = ~state)
+print(summary(es))
+```
+
+### (c) Gráfico de los efectos pre y post con intervalos de confianza
+
+**(R)** Gráfico de Stata (coeficientes e intervalos para los trimestres 1 a 6): ver `Figuras/Ejercicio 2.c.gph`. ✅ Los puntos del gráfico coinciden con la tabla de (b): ≈ −0,003; +0,006; 0 (base); −0,022; −0,020; −0,022.
+
+```{r ej2-c}
+ct <- as.data.frame(coeftable(es))
+ct$quarter_num <- as.numeric(sub(".*::(\\d+):California", "\\1", rownames(ct)))
+ct <- rbind(data.frame(Estimate = 0, `Std. Error` = 0, `t value` = NA, `Pr(>|t|)` = NA,
+                       quarter_num = 3, check.names = FALSE), ct)
+ct <- ct[order(ct$quarter_num), ]
+ct$ic_sup <- ct$Estimate + 1.96 * ct[["Std. Error"]]
+ct$ic_inf <- ct$Estimate - 1.96 * ct[["Std. Error"]]
+
+plot(ct$quarter_num, ct$Estimate, type = "b", xlab = "Quarter", ylab = "Coeficiente",
+     ylim = range(ct$ic_inf, ct$ic_sup, 0), xlim = c(1, 6))
+arrows(ct$quarter_num, ct$ic_inf, ct$quarter_num, ct$ic_sup,
+       angle = 90, code = 3, length = 0.05)
+abline(h = 0)
+```
+
+### (d) Test de placebo con los datos previos al tratamiento
+
+**(R)** Se usan los trimestres 1 a 3 (N = 81 = 27 × 3). `FakeTreat1` = California en Q1 y Q2 2011; `FakeTreat2` = California solo en Q2 2011:
+
+| Regresión | Coef. | EE | t | P>\|t\| |
+|---|---|---|---|---|
+| FakeTreat1 | 0,0060904 | 0,0050881 | 1,20 | 0,242 |
+| FakeTreat2 | −0,0016769 | 0,0027968 | −0,60 | 0,554 |
+
+**(R)** "Por lo tanto, no se encuentra un efecto estadísticamente significativo para estas fechas de tratamiento falsas, por lo que es evidencia de que el diseño está bien hecho."
+
+> ✅ **Verificado:** los placebos son consistentes con el event study de (b): `FakeTreat1` = promedio de (q2 − q1) y (q3 − q1) = ((0,0062961 + 0,0029423) + (0 + 0,0029423))/2 = **0,0060904** ✓, y `FakeTreat2` = 0 − (−0,0029423 + 0,0062961)/2 = **−0,0016769** ✓.
+>
+> ⚠️ **DISCREPANCIA #6.** La conclusión es demasiado fuerte: (i) no rechazar un placebo con solo tres períodos y 27 estados es evidencia **compatible** con tendencias paralelas, no una prueba de que el diseño esté bien; (ii) el propio event study de (b) muestra que el coeficiente del trimestre 2 es **estadísticamente significativo** (+0,0063; p = 0,010) antes del tratamiento (aunque con signo opuesto a los efectos post y de magnitud tres veces menor). Hubiera correspondido mencionarlo.
+
+```{r ej2-d}
+org3 <- org[org$quarter_num <= 3, ]
+
+org3$FakeTreat1 <- as.numeric(org3$state == "California" & org3$quarter %in% c("Q12011", "Q22011"))
+org3$FakeTreat2 <- as.numeric(org3$state == "California" & org3$quarter == "Q22011")
+
+print(summary(feols(rate ~ FakeTreat1 | state + quarter, data = org3, cluster = ~state)))
+print(summary(feols(rate ~ FakeTreat2 | state + quarter, data = org3, cluster = ~state)))
+```
+
+---
+
+## Ejercicio 3 — Callaway & Sant'Anna y `csdid`
+
+**(P)** Con `mpdta.dta` (impacto de una suba del salario mínimo sobre el empleo joven; 500 condados × 5 años, 2003–2007; N = 2.500). Grupos tratados: 2004, 2006 y 2007.
+
+Función que replica `csdid` (método `dripw`) y los `estat` de Stata:
+
+```{r ej3-helper}
+mp <- leer("Datos/mpdta.dta")
+str(mp)
+
+# Equivalente a: csdid (dripw) + estat pretrend / simple / group / calendar / event
+# (errores estándar analíticos, sin bootstrap)
+csdid_todo <- function(data, xformla = ~1, control = "nevertreated") {
+  res <- att_gt(yname = "lemp", tname = "year", idname = "countyreal", gname = "first_treat",
+                xformla = xformla, data = data, est_method = "dr",
+                control_group = control, bstrap = FALSE, cband = FALSE)
+  print(summary(res))
+
+  # estat pretrend: test de Wald de que los efectos pre-tratamiento son cero
+  pre <- which(res$group > res$t)
+  if (length(pre) > 0) {
+    V <- res$V_analytical[pre, pre, drop = FALSE]
+    W <- drop(t(res$att[pre]) %*% solve(V) %*% res$att[pre])
+    cat(sprintf("Pretrend: chi2(%d) = %.4f, p-valor = %.4f\n",
+                length(pre), W, pchisq(W, length(pre), lower.tail = FALSE)))
+  }
+
+  # estat simple / group / calendar / event
+  for (tipo in c("simple", "group", "calendar", "dynamic")) {
+    cat("\n== aggte:", tipo, "==\n")
+    print(summary(aggte(res, type = tipo, na.rm = TRUE, bstrap = FALSE, cband = FALSE)))
+  }
+  invisible(res)
+}
+```
+
+### (a) Estimar todos los ATT(g, t) sin variables explicativas
+
+**(R)** Control: nunca tratados (N = 2.500; en `csdid` el período base de los efectos pre-tratamiento es el año anterior):
+
+| Grupo | ATT(g, t) | Coef. | EE | P>\|z\| |
+|---|---|---|---|---|
+| 2004 | 2003→2004 | −0,0105032 | 0,023251 | 0,651 |
+| 2004 | 2003→2005 | −0,0704232 | 0,0309848 | 0,023 |
+| 2004 | 2003→2006 | −0,1372587 | 0,0364377 | 0,000 |
+| 2004 | 2003→2007 | −0,1008114 | 0,0343592 | 0,003 |
+| 2006 | 2003→2004 (pre) | 0,0065201 | 0,0233268 | 0,780 |
+| 2006 | 2004→2005 (pre) | −0,0027508 | 0,0195586 | 0,888 |
+| 2006 | 2005→2006 | −0,0045946 | 0,0177552 | 0,796 |
+| 2006 | 2005→2007 | −0,0412245 | 0,0202292 | 0,042 |
+| 2007 | 2003→2004 (pre) | 0,0305067 | 0,0150336 | 0,042 |
+| 2007 | 2004→2005 (pre) | −0,0027259 | 0,0163958 | 0,868 |
+| 2007 | 2005→2006 (pre) | −0,0310871 | 0,0178775 | 0,082 |
+| 2007 | 2006→2007 | −0,0260544 | 0,0166554 | 0,118 |
+
+✅ **Verificado:** N = 500 × 5 = 2.500; hay 12 ATT(g, t) (4 + 4 + 4), de los cuales 5 son pre-tratamiento (los de los grupos 2006 y 2007 en años anteriores a la adopción), que son los que entran en el test de (b).
+
+```{r ej3-a}
+# INCISOS (a), (b), (c): nunca tratados, sin covariables
+res_a <- csdid_todo(mp, ~1, "nevertreated")
+```
+
+### (b) Plausibilidad de tendencias paralelas
+
+**(R)** Solo muestra el test:
+
+```
+Pretrend Test. H0 All Pre-treatment are equal to 0
+chi2(5) = 7.7912
+p-value = 0.1681
+```
+
+> ⚠️ **DISCREPANCIA #7.** El enunciado pide **evaluar** si es plausible el supuesto, considerar si hubo **factores comunes a todos los estados tratados** que afecten el empleo sin ser el tratamiento, y **reflexionar sobre niveles vs. logaritmos**. (R) no escribe nada. 💡 **Respuesta sugerida (mía):**
+> - No se rechaza que los 5 efectos pre-tratamiento sean cero conjuntamente (p = 0,168), lo que es consistente con tendencias paralelas, aunque con 5 coeficientes y errores estándar grandes el test tiene poca potencia. Individualmente, dos coeficientes pre del grupo 2007 son marginalmente significativos (2003→2004: p = 0,042; 2005→2006: p = 0,082).
+> - Un factor común a los estados tratados (por ejemplo, un shock regional o sectorial que afecte más a esos estados) violaría el supuesto aunque el test no lo detecte.
+> - Con el empleo en **logaritmos** (`lemp`), tendencias paralelas significa crecimiento porcentual común; en **niveles** significaría cambios absolutos comunes. Como los condados tienen tamaños muy distintos, es más plausible el supuesto en logaritmos; el supuesto **no es invariante a la transformación** de la variable.
+
+### (c) Efectos agregados: simple, por grupos, por período y por períodos relativos (evento)
+
+**(R)** Sin covariables, nunca tratados:
+
+| Agregado | Coef. | EE | P>\|z\| |
+|---|---|---|---|
+| **ATT simple** | **−0,0399513** | 0,012034 | 0,001 |
+| Por grupo: promedio | −0,0310183 | 0,0123872 | 0,012 |
+| G2004 | −0,0797491 | 0,0263678 | 0,002 |
+| G2006 | −0,0229095 | 0,0167033 | 0,170 |
+| G2007 | −0,0260544 | 0,0166554 | 0,118 |
+| Por período: promedio | −0,0417004 | 0,0159719 | 0,009 |
+| T2004 / T2005 / T2006 / T2007 | −0,0105032 / −0,0704232 / −0,048816 / −0,0370593 | | |
+| Evento: Pre_avg | 0,0018283 | 0,007657 | 0,811 |
+| Evento: Post_avg | −0,0772398 | 0,019965 | 0,000 |
+| Tm3 / Tm2 / Tm1 | 0,0305067 / −0,0005631 / −0,0244587 | | |
+| Tp0 / Tp1 / Tp2 / Tp3 | −0,0199318 / −0,0509574 / −0,1372587 / −0,1008114 | | |
+
+> ✅ **Verificado:** G2004 = promedio de ATT(2004, t), t = 2004…2007: (−0,0105 − 0,0704 − 0,1373 − 0,1008)/4 = −0,0797 ✓; G2006 = (−0,0046 − 0,0412)/2 = −0,0229 ✓; Tp3 = ATT(2004, 2007) y Tp2 = ATT(2004, 2006) ✓.
+>
+> Nota: el efecto "por grupos" promedio (−0,031) difiere del simple (−0,040) porque ponderan distinto (el simple pondera por tamaño de grupo y número de períodos tratados).
+
+### (d) Repetir condicionando en la población (`lpop`)
+
+**(R)** Pretrend: χ²(5) = 6,8418; p = 0,2327. ATT simple = −0,0417518 (EE 0,0115028; p = 0,000). Los ATT(g, t) cambian levemente (p. ej. 2004: −0,0145; −0,0764; −0,1404; −0,1069). Por período: promedio −0,0441774; T2004 … T2007 = −0,0145297 / −0,0764219 / −0,0461757 / −0,0395822. Evento: Pre_avg −0,0000442 (p = 0,995), Post_avg −0,0803539, Tm3 0,0267278, Tm2 −0,0036165, Tm1 −0,023244, Tp0 −0,0210604, Tp1 −0,0530032, Tp2 −0,1404483, Tp3 −0,1069039.
+
+**(R)** Efecto agregado por grupos "con variables explicativas": promedio −0,0310183; G2004 −0,0797491; G2006 −0,0229095; G2007 −0,0260544.
+
+> ⚠️ **DISCREPANCIA #8.** Esos cuatro números son **idénticos** a los de (c) (sin covariables), pero los ATT(g, t) de (d) son otros. Con los ATT de (d), los agregados por grupo deberían ser:
+>
+> | Grupo | Cálculo con los ATT(g, t) de (d) | Debería ser | (R) reporta |
+> |---|---|---|---|
+> | G2004 | (−0,0145297 − 0,0764219 − 0,1404483 − 0,1069039)/4 | **−0,0846** | −0,0797 |
+> | G2006 | (0,0009606 − 0,0412939)/2 | **−0,0202** | −0,0229 |
+> | G2007 | ATT(2007, 2007) | **−0,0288** | −0,0261 |
+>
+> Parece un error de copia (se pegó el bloque de (c)). Los demás agregados de (d) (por período, evento) sí son consistentes con los ATT de (d): T2004 = ATT(2004, 2004) y Tp3 = ATT(2004, 2007) ✓.
+
+```{r ej3-d}
+# INCISO (d)
+res_d <- csdid_todo(mp, ~lpop, "nevertreated")
+```
+
+```{r ej3-d-chequeo}
+# AGREGADO: agregados por grupo recalculados a mano con los ATT(g, t) de (d) (cifras del PDF)
+G2004 <- mean(c(-0.0145297, -0.0764219, -0.1404483, -0.1069039))
+G2006 <- mean(c( 0.0009606, -0.0412939))
+G2007 <- -0.0287814
+round(c(G2004 = G2004, G2006 = G2006, G2007 = G2007), 4)
+```
+
+### (e) Grupo de control "no tratados todavía"
+
+**(R)**
+
+| | Sin covariables | Con `lpop` |
+|---|---|---|
+| Pretrend χ²(5) / p | 7,7912 / 0,1681 | 6,8655 / 0,2308 |
+| ATT simple | −0,0397636 (EE 0,0120524) | −0,0413516 (EE 0,0114278) |
+| Por grupo: promedio | −0,0304622 | −0,032264 |
+| G2004 / G2006 / G2007 | −0,0836943 / −0,0182818 / −0,0260544 | −0,0869705 / −0,0163166 / −0,0287814 |
+| Por período: promedio | −0,0442671 | −0,0456646 |
+| T2004 / T2005 / T2006 / T2007 | −0,0193724 / −0,0783191 / −0,0423175 / −0,0370593 | −0,0211831 / −0,0816032 / −0,0402901 / −0,0395822 |
+| Evento: Pre_avg / Post_avg | 0,0011834 / −0,0773993 | −0,0004609 / −0,0799926 |
+| Tm3 / Tm2 / Tm1 | 0,0305067 / −0,0026877 / −0,0242689 | 0,0267278 / −0,0052499 / −0,0228606 |
+| Tp0 / Tp1 / Tp2 / Tp3 | −0,0189222 / −0,0535893 / −0,1362743 / −0,1008114 | −0,0201445 / −0,0547303 / −0,1381918 / −0,1069039 |
+
+> ✅ **Verificado:** los agregados por grupo de (e) sí son consistentes con sus ATT(g, t) (p. ej. G2004 sin covariables: (−0,0193724 − 0,0783191 − 0,1362743 − 0,1008114)/4 = −0,0836943 ✓; G2006 con covariables: (0,0086607 − 0,0412939)/2 = −0,0163166 ✓).
+>
+> ⚠️ **DISCREPANCIA #9.** El test de pre-tendencias "sin covariables, no tratados todavía" da **exactamente** χ²(5) = 7,7912 y p = 0,1681, igual que en (b) con nunca tratados. Pero los ATT pre-tratamiento de ambas estimaciones **son distintos** (p. ej. grupo 2006, 2003→2004: 0,0065 con nunca tratados vs. −0,0026 con no tratados todavía; Tm2: −0,0006 vs. −0,0027), así que el estadístico no debería coincidir. Probablemente se copió el resultado de (b). (Con covariables sí cambia: 6,8418 → 6,8655.)
+>
+> ⚠️ **DISCREPANCIA #10.** La pregunta es "**¿se observan cambios?**" y (R) no responde. 💡 **Respuesta (mía):** casi ninguno. El ATT simple pasa de −0,0400 a −0,0398 (sin covariables) y de −0,0418 a −0,0414 (con covariables); cambian algo los pre-tratamiento y los ATT(g, t) del grupo 2004 y 2006 en los primeros años, pero las conclusiones (efecto negativo y creciente en el tiempo, pre-tendencias no rechazadas) son las mismas. Es esperable: la diferencia entre ambos controles solo importa cuando hay grupos aún no tratados que difieren de los nunca tratados.
+
+```{r ej3-e}
+# INCISO (e): grupo de control "not yet treated"
+res_e1 <- csdid_todo(mp, ~1, "notyettreated")
+res_e2 <- csdid_todo(mp, ~lpop, "notyettreated")
+```
+
+### (f) Comparar con TWFE estático y dinámico
+
+```{r ej3-f}
+# INCISO (f)
+mp$D <- as.numeric(mp$first_treat <= mp$year & mp$treat == 1)
+
+for (i in 1:4) {
+  mp[[paste0("Tm", i)]] <- ifelse(mp$treat == 1, as.numeric(mp$year - mp$first_treat == -i), 0)
+}
+for (i in 0:3) {
+  mp[[paste0("Tp", i)]] <- ifelse(mp$treat == 1, as.numeric(mp$year - mp$first_treat == i), 0)
+}
+
+print(summary(feols(lemp ~ D | countyreal + year, data = mp, cluster = ~countyreal)))
+print(summary(feols(lemp ~ Tm4 + Tm3 + Tm2 + Tm1 + Tp1 + Tp2 + Tp3 | countyreal + year,
+                    data = mp, cluster = ~countyreal)))
+```
+
+**(R)** TWFE estático (N = 2.500; 500 clusters):
+
+| Variable | Coef. | EE | t | P>\|t\| |
+|---|---|---|---|---|
+| D | −0,0365489 | 0,0132652 | −2,76 | 0,006 |
+
+TWFE dinámico (se omite Tp0):
+
+| Variable | Coef. | EE | P>\|t\| |
+|---|---|---|---|
+| Tm4 | 0,0216933 | 0,0253871 | 0,393 |
+| Tm3 | 0,0427674 | 0,0199126 | 0,032 |
+| Tm2 | 0,0414987 | 0,0162692 | 0,011 |
+| Tm1 | 0,0181439 | 0,0109822 | 0,099 |
+| Tp1 | −0,0253284 | 0,0160191 | 0,114 |
+| Tp2 | −0,1136509 | 0,0270505 | 0,000 |
+| Tp3 | −0,0741029 | 0,031016 | 0,017 |
+
+> ⚠️ **DISCREPANCIA #11.** (R) no escribe la comparación que pide el enunciado. 💡 **Comparación sugerida (mía), con los números del PDF:**
+> - **Estático:** TWFE −0,0365 vs. CS −0,0400 (simple) / −0,0310 (por grupos): magnitudes parecidas, ambos significativos.
+> - **Dinámico:** el TWFE muestra **pre-coeficientes significativos y positivos** (Tm3 = 0,043, p = 0,032; Tm2 = 0,041, p = 0,011), mientras que CS da pre-tendencias **cercanas a cero** (Pre_avg = 0,0018, p = 0,81; test conjunto p = 0,17). Los post de TWFE también difieren (Tp2: −0,114 vs. −0,137; Tp3: −0,074 vs. −0,101): esa distorsión es compatible con la contaminación por heterogeneidad / comparaciones con ya tratados del TWFE.
+> - **Normalización:** el `.do` omite `Tp0` (r = 0) como categoría base, en lugar de r = −1 (lo habitual). Como el efecto en r = 0 ya es negativo (CS: Tp0 = −0,020), tomar r = 0 como base **desplaza hacia arriba** los coeficientes previos y puede generar pre-tendencias aparentes. El código de abajo (agregado) usa r = −1 como base para que sea comparable con CS.
+
+```{r ej3-f-base-menos1}
+# AGREGADO: TWFE dinámico con r = -1 como categoría base (se omite Tm1 en vez de Tp0).
+# Los coeficientes son comparables con el event study de csdid (que usa el año previo).
+print(summary(feols(lemp ~ Tm4 + Tm3 + Tm2 + Tp0 + Tp1 + Tp2 + Tp3 | countyreal + year,
+                    data = mp, cluster = ~countyreal)))
+```
+
+---
+
+## Ejercicio 4 — Enfoque de Wooldridge y `jwdid`
+
+**(P)** Replicar el ejercicio anterior con `jwdid`. Con $T$ períodos y tratamiento desde el período $q$: $Y_{it}=\alpha+\lambda_q d_{iq}+\dots+\lambda_T d_{iT}+\sum_{r=q}^{T}\sum_{s=r}^{T}\tau_{rs}(d_{ir}\cdot\mathbb{1}\{t=s\})+\theta_t+\epsilon_{it}$. Nota del enunciado: no se pueden replicar el test de tendencias previas ni los gráficos.
+
+**(R)** Cuatro estimaciones de `jwdid` (opción `group`, sin `ivar` en la tabla: efectos fijos absorbidos = `first_treat` y `year`):
+
+| ATT(g, t) | Nunca tratados, sin cov. | No tratados todavía, sin cov. | `csdid` nunca tratados | `csdid` no tratados todavía |
+|---|---|---|---|---|
+| 2004, 2004 | −0,0105032 | −0,0193724 | −0,0105032 | −0,0193724 |
+| 2004, 2005 | −0,0704232 | −0,0783191 | −0,0704232 | −0,0783191 |
+| 2004, 2006 | −0,1372587 | −0,1360781 | −0,1372587 | −0,1362743 |
+| 2004, 2007 | −0,1008114 | −0,1047075 | −0,1008114 | −0,1008114 |
+| 2006, 2006 | −0,0045946 | 0,0025139 | −0,0045946 | 0,0046609 |
+| 2006, 2007 | −0,0412245 | −0,0391927 | −0,0412245 | −0,0412245 |
+| 2007, 2007 | −0,0260544 | −0,043106 | −0,0260544 | −0,0260544 |
+
+También reporta las dos estimaciones con `lpop` (nunca tratados y no tratados todavía), con las interacciones con `lpop`.
+
+> ✅ **Verificado:** con nunca tratados, `jwdid` reproduce **exactamente** los ATT(g, t) post-tratamiento de `csdid` (solo cambian levemente los errores estándar). Eso es lo esperado: con tratamiento escalonado y sin covariables los dos enfoques coinciden. Además, la tabla de efectos fijos absorbidos (`first_treat`: 4 categorías; `year`: 5) confirma que la opción `group` usa efectos fijos de **cohorte** (no de unidad), que es lo que supone el código R (no pasar `ivar` a `etwfe`).
+>
+> ⚠️ **DISCREPANCIA #12.** El `.do` corre después de cada `jwdid` los comandos `estat simple`, `estat group`, `estat calendar` y `estat event`, pero (R) **no muestra ninguno**: solo la tabla de coeficientes. Sin los agregados no se puede comparar con el ejercicio anterior, que es lo que pide el enunciado ("replique el ejercicio anterior").
+>
+> ⚠️ **DISCREPANCIA #13.** Con no tratados todavía, `jwdid` **no coincide** con `csdid` en varios ATT (últimas dos columnas), y la diferencia más marcada es ATT(2007, 2007): −0,0431 vs. −0,0261. En 2007 todos los grupos están tratados salvo los nunca tratados, así que `csdid` da el mismo valor que con nunca tratados; el estimador de Wooldridge usa otra forma de armar el control (regresión conjunta con efectos de cohorte y año), de ahí la diferencia. (R) no lo comenta. Los efectos pre-tratamiento de `jwdid` (p. ej. "2006 2003", "2007 2005") usan como base el año previo al tratamiento (r = −1), por lo que no son directamente comparables con los de `csdid` (que usa el período anterior), salvo con el signo cambiado en algunos casos (p. ej. 2007, 2005 = +0,0310871 vs. csdid 2005→2006 = −0,0310871).
+
+```{r ej4}
+# Equivalente a jwdid + estat simple / group / calendar / event
+# (Wooldridge 2021, ETWFE). cgroup = "never" replica la opción "never" de jwdid;
+# sin esa opción el grupo de control es "not yet treated".
+# Se omite ivar (efectos fijos de grupo/cohorte) para replicar la opción "group".
+jwdid_todo <- function(data, fml, cgroup) {
+  mod <- etwfe(fml = fml, tvar = year, gvar = first_treat, data = data, cgroup = cgroup)
+  print(mod)
+  for (tipo in c("simple", "group", "calendar", "event")) {
+    cat("\n== emfx:", tipo, "==\n")
+    print(emfx(mod, type = tipo))
+  }
+  invisible(mod)
+}
+
+jw1 <- jwdid_todo(mp, lemp ~ 0, "never")
+jw2 <- jwdid_todo(mp, lemp ~ lpop, "never")
+jw3 <- jwdid_todo(mp, lemp ~ 0, "notyet")
+jw4 <- jwdid_todo(mp, lemp ~ lpop, "notyet")
+```
+
+---
+
+## Anexo — Script completo en R
+
+El script completo está en [`Datos/Trabajo Práctico N° 4.R`](Datos/Trabajo%20Práctico%20N°%204.R). Los chunks de arriba son el mismo código dividido por inciso, con estas diferencias: las rutas de los datos (`Datos/...`, relativas a este documento) y los bloques marcados "AGREGADO" (verificación de Frisch-Waugh-Lovell del Ejercicio 1, recálculo de los agregados por grupo de 3 (d), y TWFE dinámico con r = −1 como base en 3 (f)).

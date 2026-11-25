@@ -1,0 +1,504 @@
+---
+title: "Trabajo Práctico N° 6"
+subtitle: "Maestría en Econometría UTDT - Análisis Estadístico Multivariado"
+author: "Juan Menduiña"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: false
+    self_contained: true
+    df_print: paged
+lang: es
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.align = "center", fig.width = 8, fig.height = 5)
+options(digits = 7, OutDec = ".")
+
+if (!requireNamespace("haven", quietly = TRUE)) install.packages("haven")
+library(haven)
+
+# Carpeta con las bases (eurosec.dta, ind.dta, ipc2dig.dta, sachs.dta, heritage.dta).
+# Se asume que este Rmd está en la carpeta "Trabajo Práctico N° 6".
+datos <- "Datos"
+
+# Formato con coma decimal, como en el informe
+fmt <- function(x, d = 4) format(x, digits = d, decimal.mark = ",")
+tabla <- function(x, d = 4, ...) knitr::kable(x, digits = d, format.args = list(decimal.mark = ","), ...)
+tabla_mv <- function(x) knitr::kable(x, digits = 4, format.args = list(decimal.mark = ","), na = "")
+
+azul <- "#1A476F"
+
+#-------------------------------------------------------------------------------
+# Test de normalidad multivariada (equivalente a "mvtest normality, stats(all)" de Stata)
+#-------------------------------------------------------------------------------
+
+decision <- function(p) {
+  ifelse(p < 0.01, "Rechaza H0 al 1%",
+  ifelse(p < 0.05, "Rechaza H0 al 5%",
+  ifelse(p < 0.10, "Rechaza H0 al 10%", "No rechaza H0 (10%)")))
+}
+
+fila <- function(prueba, valor, est, dist, p) {
+  data.frame(Prueba = prueba, Valor = valor, `Estadístico` = est, `Distribución` = dist,
+             `Valor p` = p, `Decisión` = decision(p), check.names = FALSE)
+}
+
+mv_normalidad <- function(X) {
+  X <- as.matrix(X); n <- nrow(X); p <- ncol(X)
+  Xc <- sweep(X, 2, colMeans(X))
+  Sml <- crossprod(Xc) / n
+  M <- Xc %*% solve(Sml) %*% t(Xc)
+
+  b1 <- sum(M^3) / n^2
+  b2 <- sum(diag(M)^2) / n
+  kappa <- (p + 1) * (n + 1) * (n + 3) / (n * ((n + 1) * (p + 1) - 6))
+  chi_sk <- n * kappa * b1 / 6; df_sk <- p * (p + 1) * (p + 2) / 6
+  chi_ku <- ((b2 - p * (p + 2)) / sqrt(8 * p * (p + 2) / n))^2
+
+  beta <- (1 / sqrt(2)) * ((2 * p + 1) * n / 4)^(1 / (p + 4))
+  Dj <- diag(M); Djk <- outer(Dj, Dj, "+") - 2 * M
+  HZ <- n * (sum(exp(-beta^2 / 2 * Djk)) / n^2 -
+             2 * (1 + beta^2)^(-p / 2) * mean(exp(-beta^2 / (2 * (1 + beta^2)) * Dj)) +
+             (1 + 2 * beta^2)^(-p / 2))
+  a <- 1 + 2 * beta^2; w <- (1 + beta^2) * (1 + 3 * beta^2)
+  mu <- 1 - a^(-p / 2) * (1 + p * beta^2 / a + p * (p + 2) * beta^4 / (2 * a^2))
+  s2 <- 2 * (1 + 4 * beta^2)^(-p / 2) +
+    2 * a^(-p) * (1 + 2 * p * beta^4 / a^2 + 3 * p * (p + 2) * beta^8 / (4 * a^4)) -
+    4 * w^(-p / 2) * (1 + 3 * p * beta^4 / (2 * w) + p * (p + 2) * beta^8 / (2 * w^2))
+  lm <- log(sqrt(mu^4 / (s2 + mu^2))); lv <- log((s2 + mu^2) / mu^2)
+  chi_hz <- ((log(HZ) - lm) / sqrt(lv))^2
+
+  Z <- Xc %*% diag(1 / sqrt(diag(Sml)), p)
+  e <- eigen(crossprod(Z) / n, symmetric = TRUE)
+  Y <- Z %*% e$vectors %*% diag(1 / sqrt(e$values), p) %*% t(e$vectors)
+  sk <- apply(Y, 2, function(y) mean(y^3) / mean(y^2)^1.5)
+  ku <- apply(Y, 2, function(y) mean(y^4) / mean(y^2)^2)
+  bs <- 3 * (n^2 + 27 * n - 70) * (n + 1) * (n + 3) / ((n - 2) * (n + 5) * (n + 7) * (n + 9))
+  W2 <- -1 + sqrt(2 * (bs - 1)); dl <- 1 / sqrt(log(sqrt(W2)))
+  yv <- sk * sqrt((W2 - 1) * (n + 1) * (n + 3) / (12 * (n - 2)))
+  z1 <- dl * log(yv + sqrt(yv^2 + 1))
+  d <- (n - 3) * (n + 1) * (n^2 + 15 * n - 4)
+  aa <- (n - 2) * (n + 5) * (n + 7) * (n^2 + 27 * n - 70) / (6 * d)
+  cc <- (n - 7) * (n + 5) * (n + 7) * (n^2 + 2 * n - 5) / (6 * d)
+  kk <- (n + 5) * (n + 7) * (n^3 + 37 * n^2 + 11 * n - 313) / (12 * d)
+  al <- aa + sk^2 * cc
+  chi <- (ku - 1 - sk^2) * 2 * kk
+  z2 <- (((chi / (2 * al))^(1 / 3)) - 1 + 1 / (9 * al)) * sqrt(9 * al)
+  DH <- sum(z1^2 + z2^2)
+
+  rbind(
+    fila("Mardia mSkewness", b1, chi_sk, paste0("chi2(", df_sk, ")"), pchisq(chi_sk, df_sk, lower.tail = FALSE)),
+    fila("Mardia mKurtosis", b2, chi_ku, "chi2(1)", pchisq(chi_ku, 1, lower.tail = FALSE)),
+    fila("Henze-Zirkler", HZ, chi_hz, "chi2(1)", pchisq(chi_hz, 1, lower.tail = FALSE)),
+    fila("Doornik-Hansen", NA_real_, DH, paste0("chi2(", 2 * p, ")"), pchisq(DH, 2 * p, lower.tail = FALSE))
+  )
+}
+
+#-------------------------------------------------------------------------------
+# Análisis factorial
+#-------------------------------------------------------------------------------
+
+# Factores principales (Stata: factor, pf): comunalidades iniciales = SMC, sin iterar
+pf_fit <- function(X) {
+  R <- cor(X)
+  Rr <- R; diag(Rr) <- 1 - 1 / diag(solve(R))
+  e <- eigen(Rr, symmetric = TRUE)
+  list(R = R, ev = e$values, V = e$vectors, nombres = colnames(X))
+}
+
+pf_cargas <- function(f, m) {
+  L <- f$V[, 1:m, drop = FALSE] %*% diag(sqrt(f$ev[1:m]), m)
+  for (k in 1:m) if (sum(L[, k]) < 0) L[, k] <- -L[, k]
+  dimnames(L) <- list(f$nombres, paste0("Factor", 1:m))
+  L
+}
+
+tabla_pf <- function(ev) {
+  data.frame(Autovalor = ev, Diferencia = c(-diff(ev), NA),
+             Proporción = ev / sum(ev), Acumulada = cumsum(ev / sum(ev)),
+             row.names = paste0("Factor", seq_along(ev)))
+}
+
+# Máxima verosimilitud (Stata: factor, ml). Se permite que las unicidades lleguen casi a 0
+# (casos de Heywood); si el optimizador falla con el inicio por defecto, se prueban inicios aleatorios
+ml_fa <- function(R, m, N, lower = 1e-6) {
+  ctrl <- list(lower = lower, opt = list(maxit = 5000))
+  r <- tryCatch(factanal(covmat = R, factors = m, n.obs = N, rotation = "none", control = ctrl),
+                error = function(e) NULL)
+  s <- 0
+  while (is.null(r) && s < 200) {
+    s <- s + 1
+    set.seed(s)
+    r <- tryCatch(factanal(covmat = R, factors = m, n.obs = N, rotation = "none",
+                           start = runif(nrow(R), 0.2, 0.8), control = ctrl),
+                  error = function(e) NULL)
+  }
+  r
+}
+
+# Selección del número de factores (ftest.do): estadístico, AIC y BIC = N*(ln|V0|-ln|C|) - gl*ln(N);
+# se elige el número de factores con el menor BIC (criterio de Schwarz, 1978)
+bic_factores <- function(X, ms, alpha = 0.05) {
+  N <- nrow(X); p <- ncol(X); Co <- cor(X)
+  filas <- lapply(ms, function(m) {
+    gl <- ((p - m)^2 - (p + m)) / 2
+    fa <- if (gl > 0) ml_fa(Co, m, N) else NULL
+    if (is.null(fa)) return(NULL)
+    Vo <- fa$loadings %*% t(fa$loadings) + diag(fa$uniquenesses)
+    dif <- log(det(Vo)) - log(det(Co))
+    est <- ((N - 1) - (2 * p + 4 * m + 5) / 6) * dif
+    data.frame(Factores = m, `Estadístico` = est, gl = gl,
+               `Valor crítico` = qchisq(1 - alpha, gl), `Valor p` = pchisq(est, gl, lower.tail = FALSE),
+               AIC = N * dif - ((p - m)^2 - p - m), BIC = N * dif - gl * log(N), check.names = FALSE)
+  })
+  do.call(rbind, filas)
+}
+
+# Rotación ortogonal varimax (sin normalización de Kaiser, como "rotate, orthogonal varimax" de Stata).
+# Los factores rotados se ordenan por varianza explicada y se orientan con suma de cargas positiva.
+varimax_stata <- function(L) {
+  v <- varimax(L, normalize = FALSE, eps = 1e-5)
+  Lr <- unclass(v$loadings); T <- v$rotmat
+  ord <- order(colSums(Lr^2), decreasing = TRUE)
+  Lr <- Lr[, ord, drop = FALSE]; T <- T[, ord, drop = FALSE]
+  sg <- ifelse(colSums(Lr) < 0, -1, 1)
+  Lr <- sweep(Lr, 2, sg, "*"); T <- sweep(T, 2, sg, "*")
+  dimnames(Lr) <- dimnames(L)
+  dimnames(T) <- list(colnames(L), colnames(L))
+  list(L = Lr, T = T)
+}
+
+# Criterio varimax: suma, sobre los factores, de la varianza de las cargas al cuadrado
+criterio_varimax <- function(L) {
+  sum(apply(L^2, 2, function(l) mean(l^2) - mean(l)^2))
+}
+
+# loadingplot: matriz de gráficos de dispersión de las cargas de cada par de factores
+loadingplot_r <- function(L, titulo) {
+  m <- ncol(L)
+  panel <- function(x, y, ...) {
+    points(x, y, pch = 19, col = azul, cex = 0.6)
+    text(x, y, rownames(L), cex = 0.55, pos = 3)
+  }
+  pairs(L, labels = paste("Factor", 1:m), main = titulo, lower.panel = panel, upper.panel = panel)
+}
+
+# Análisis factorial completo para una base de datos y un número de factores dado
+fa_modelo <- function(X, m, metodo = c("pf", "ml")) {
+  metodo <- match.arg(metodo)
+  R <- cor(X); N <- nrow(X)
+  if (metodo == "pf") {
+    f <- pf_fit(X)
+    L <- pf_cargas(f, m)
+    tab_ev <- tabla_pf(f$ev)
+    psi <- 1 - rowSums(L^2)
+  } else {
+    fa <- ml_fa(R, m, N)
+    L <- unclass(fa$loadings); dimnames(L) <- list(colnames(X), paste0("Factor", 1:m))
+    psi <- fa$uniquenesses
+    ss <- colSums(L^2)
+    tab_ev <- data.frame(Autovalor = ss, Diferencia = c(-diff(ss), NA), Proporción = ss / sum(ss),
+                         Acumulada = cumsum(ss / sum(ss)), row.names = paste0("Factor", 1:m))
+  }
+  names(psi) <- colnames(X)
+  rot <- varimax_stata(L)
+  list(R = R, N = N, L = L, psi = psi, tab_ev = tab_ev, rot = rot,
+       B_sin_rotar = solve(R) %*% L, B_rotado = solve(R) %*% rot$L, metodo = metodo)
+}
+```
+
+# Ejercicio 1
+
+*Estimar el modelo factorial para la base de datos "eurosec.dta", de acuerdo con el número de factores resultantes del proceso de selección de modelos introducido por Schwarz (1978). Obtener, luego, la matriz ortogonal $C_{m \times m}$ verificando que las cargas asociadas a cada factor presenten la máxima varianza posible. Finalmente, estimar el vector de factores correspondiente al ajuste efectuado.*
+
+```{r ej1-datos}
+eurosec <- as.data.frame(read_dta(file.path(datos, "eurosec.dta")))
+vars1 <- paste0("s", 1:9)
+X1 <- eurosec[vars1]
+dim(X1)
+```
+
+**Selección del número de factores (criterio de Schwarz).** Se estima el modelo de máxima verosimilitud con $m = 1, \dots, 5$ factores (los que dejan grados de libertad positivos) y se elige el $m$ con menor BIC:
+
+```{r ej1-bic}
+bic1 <- bic_factores(X1, 1:6)
+tabla(bic1, d = 3)
+factors1 <- bic1$Factores[which.min(bic1$BIC)]
+```
+
+El número de factores resultantes del proceso de selección de modelos introducido por Schwarz (1978) es `r factors1`.
+
+**Normalidad multivariada:**
+
+```{r ej1-norm}
+tabla_mv(mv_normalidad(X1))
+```
+
+Por lo tanto, para los tests Mardia mSkewness y Doornik-Hansen, con un nivel de significancia del 1%, estos datos aportan evidencia suficiente para indicar que no tienen una distribución normal multivariada, mientras que, para los tests Mardia mKurtosis y Henze-Zirkler, con un nivel de significancia del 10%, estos datos no aportan evidencia suficiente para indicar que no tienen una distribución normal multivariada.
+
+**Modelo factorial por máxima verosimilitud con `r factors1` factores:**
+
+```{r ej1-ml}
+fa1 <- fa_modelo(X1, factors1, "ml")
+tabla(fa1$tab_ev, d = 5)
+tabla(cbind(fa1$L, Uniqueness = fa1$psi), d = 4)
+```
+
+> **⚠ Anotación (la solución de máxima verosimilitud no es única y difiere de la del PDF):** el PDF advierte que la solución es un caso de Heywood (varias unicidades en 0). En esos casos la verosimilitud tiene soluciones de frontera y distintos optimizadores pueden terminar en puntos distintos: las cargas, las unicidades y el orden de los factores de la tabla de arriba no coinciden con las del PDF (por ejemplo, el PDF da una unicidad de 0,3815 para `s2` y 0,6504 para `s4`, mientras que aquí son `r fmt(fa1$psi["s2"], 3)` y `r fmt(fa1$psi["s4"], 3)`). Para comparar ambas soluciones se calcula la función de discrepancia $F = \ln|V| - \ln|C| + \mathrm{tr}(V^{-1}C) - p$ del modelo $V = \Lambda\Lambda' + \Psi$ (más baja = mejor ajuste) con la solución de R y con la solución impresa en el PDF:
+
+```{r ej1-anot-heywood}
+disc <- function(L, psi, C) {
+  V <- L %*% t(L) + diag(psi)
+  tryCatch(log(det(V)) - log(det(C)) + sum(diag(solve(V, C))) - nrow(C), error = function(e) NA_real_)
+}
+L_pdf <- matrix(c(
+  -0.2659,  0.9629,  0.0356,  0.0267,  0.0139,
+  -0.4405, -0.0559, -0.3140, -0.4046, -0.3988,
+  -0.1227, -0.6985, -0.5040, -0.3321, -0.3148,
+   0.1273, -0.3618, -0.1427, -0.4032, -0.1399,
+   0.0418, -0.5404, -0.6204,  0.5668,  0.0071,
+   0.3981, -0.6656,  0.0325, -0.0080,  0.6304,
+   0.9989,  0.0475,  0.0002,  0.0006, -0.0008,
+   0.1438, -0.7632,  0.5984,  0.1961, -0.0173,
+  -0.2156, -0.6515,  0.0998,  0.1911, -0.2569), nrow = 9, byrow = TRUE)
+psi_pdf <- c(0, 0.3815, 0.0337, 0.6504, 0, 0, 0, 0, 0.4166)
+C1 <- cor(X1)
+F_pdf <- disc(L_pdf, psi_pdf, C1)
+F_R <- disc(fa1$L, fa1$psi, C1)
+c(`Discrepancia (solución del PDF)` = F_pdf, `Discrepancia (solución de R)` = F_R)
+```
+
+> *Interpretación de la comparación:* con la solución de R la discrepancia es `r fmt(F_R, 4)`, frente a `r fmt(F_pdf, 4)` con la del PDF (calculada con las cargas redondeadas a 4 decimales). `r if (!is.na(F_pdf) && F_R <= F_pdf) "La solución de R ajusta igual o mejor, así que no es un error de implementación: ambas son soluciones de frontera de un problema con múltiples óptimos, y las conclusiones sobre el número de factores (el criterio de Schwarz) no se ven afectadas." else "La solución de R ajusta peor que la del PDF, por lo que conviene tomar con cautela las cargas de la tabla de arriba."`
+
+**Rotación ortogonal varimax.** Se busca la matriz ortogonal $C$ (`m x m`) que maximiza la varianza de las cargas al cuadrado de cada factor (criterio varimax):
+
+```{r ej1-loadingplot, fig.height = 6.5}
+loadingplot_r(fa1$L, "Factor loadings (sin rotar)")
+```
+
+```{r ej1-rot, fig.height = 6.5}
+tabla(fa1$rot$T, d = 4)
+loadingplot_r(fa1$rot$L, "Factor loadings (rotación varimax ortogonal)")
+```
+
+Se verifica que $C$ es ortogonal ($C'C = I$) y que la rotación aumenta la varianza de las cargas al cuadrado (criterio varimax):
+
+```{r ej1-verif}
+c(`max |C'C - I|` = max(abs(crossprod(fa1$rot$T) - diag(factors1))),
+  `Criterio varimax sin rotar` = criterio_varimax(fa1$L),
+  `Criterio varimax rotado` = criterio_varimax(fa1$rot$L),
+  `Comunalidades iguales (max dif.)` = max(abs(rowSums(fa1$L^2) - rowSums(fa1$rot$L^2))))
+```
+
+**Comunalidades y unicidades:**
+
+```{r ej1-com}
+tabla(data.frame(Variable = vars1, Uniqueness = fa1$psi, Commonality = 1 - fa1$psi), d = 4)
+```
+
+**Estimación del vector de factores.** Se estiman por regresión (Thomson), $\hat{F} = \Lambda' \Sigma^{-1} Z$ (con $Z$ las variables estandarizadas y $\Sigma$ la matriz de correlaciones). Los coeficientes de scoring, basados en los factores sin rotar, son $\Sigma^{-1}\Lambda$:
+
+```{r ej1-scores}
+tabla(fa1$B_sin_rotar, d = 5)
+Z1 <- scale(as.matrix(X1))
+factores1 <- Z1 %*% fa1$B_sin_rotar
+head(round(factores1, 4), 8)
+```
+
+El do-file calcula también la expresión equivalente $(I + \Lambda'\Psi^{-1}\Lambda)^{-1}\Lambda'\Psi^{-1}Z'$, que es igual a la anterior cuando $V = \Lambda\Lambda' + \Psi = \Sigma$; con unicidades casi nulas (caso de Heywood) $\Psi^{-1}$ es numéricamente inestable, por lo que se usa la primera.
+
+
+# Ejercicio 2
+
+*Aplicar el contraste empleado en el primer ejercicio a los datos correspondientes al Problem Set anterior. Explicar, brevemente, el resultado obtenido. ¿Cuáles son las conclusiones al respecto?*
+
+Se aplica el mismo procedimiento (selección del número de factores por Schwarz, normalidad multivariada, factores principales, rotación varimax y scores) a las bases del Problem Set 5.
+
+## Ejercicio 1 del Problem Set anterior ("ind.dta")
+
+```{r ej2a-datos}
+ind <- as.data.frame(read_dta(file.path(datos, "ind.dta")))
+vars2a <- paste0("x", 1:17)
+X2a <- ind[vars2a]
+bic2a <- bic_factores(X2a, 1:11)
+tabla(bic2a, d = 3)
+factors2a <- bic2a$Factores[which.min(bic2a$BIC)]
+```
+
+El número de factores resultantes del proceso de selección de modelos introducido por Schwarz (1978) es `r factors2a`.
+
+```{r ej2a-norm}
+tabla_mv(mv_normalidad(X2a))
+```
+
+Por lo tanto, con un nivel de significancia del 1%, estos datos aportan evidencia suficiente para indicar que no tienen una distribución normal multivariada.
+
+```{r ej2a-fa}
+fa2a <- fa_modelo(X2a, factors2a, "pf")
+tabla(fa2a$tab_ev, d = 5)
+tabla(cbind(fa2a$L, Uniqueness = fa2a$psi), d = 4)
+```
+
+```{r ej2a-plot1, fig.height = 6.5}
+loadingplot_r(fa2a$L, "Factor loadings (sin rotar)")
+```
+
+```{r ej2a-rot, fig.height = 6.5}
+tabla(fa2a$rot$T, d = 4)
+loadingplot_r(fa2a$rot$L, "Factor loadings (rotación varimax ortogonal)")
+tabla(fa2a$B_rotado, d = 5)
+```
+
+## Ejercicio 2 del Problem Set anterior ("ipc2dig.dta")
+
+```{r ej2b-datos}
+ipc <- as.data.frame(read_dta(file.path(datos, "ipc2dig.dta")))
+vars2b <- paste0("div", 1:26)
+X2b <- ipc[vars2b]
+bic2b <- bic_factores(X2b, 1:14)
+tabla(bic2b, d = 3)
+factors2b <- 4   # como en el do-file y el informe
+```
+
+El número de factores resultantes del proceso de selección de modelos introducido por Schwarz (1978) es `r factors2b`.
+
+```{r ej2b-anot, include=FALSE}
+m_min_bic <- bic2b$Factores[which.min(bic2b$BIC)]
+bic_3 <- bic2b$BIC[bic2b$Factores == 3]; bic_4 <- bic2b$BIC[bic2b$Factores == 4]
+```
+
+> **⚠ Anotación (el criterio de Schwarz no coincide exactamente con el PDF):** con la implementación de R, el menor BIC se alcanza con `r m_min_bic` factores (BIC = `r fmt(bic_3, 5)`), y no con 4 (BIC = `r fmt(bic_4, 5)`); la diferencia es de solo `r fmt(bic_4 - bic_3, 2)` puntos, por lo que ambos modelos son prácticamente equivalentes según este criterio y la elección depende de detalles del optimizador de máxima verosimilitud. El 4 del informe es consistente con el test de razón de verosimilitudes del Problem Set 5 (se rechazan 3 factores y no se rechazan 4 al 5%) y con que el cuarto autovalor sea mayor a 1, por lo que se mantiene `r factors2b` factores, como en el do-file.
+
+```{r ej2b-norm}
+tabla_mv(mv_normalidad(X2b))
+```
+
+Por lo tanto, con un nivel de significancia del 1%, estos datos aportan evidencia suficiente para indicar que no tienen una distribución normal multivariada.
+
+```{r ej2b-fa}
+fa2b <- fa_modelo(X2b, factors2b, "pf")
+tabla(fa2b$tab_ev, d = 5)
+tabla(cbind(fa2b$L, Uniqueness = fa2b$psi), d = 4)
+```
+
+```{r ej2b-plot1, fig.height = 6.5}
+loadingplot_r(fa2b$L, "Factor loadings (sin rotar)")
+```
+
+```{r ej2b-rot, fig.height = 6.5}
+tabla(fa2b$rot$T, d = 4)
+loadingplot_r(fa2b$rot$L, "Factor loadings (rotación varimax ortogonal)")
+tabla(fa2b$B_rotado, d = 5)
+```
+
+**Conclusiones.** En ambos casos los datos no son normales multivariados (se rechaza al 1% con los cuatro tests), por lo que los contrastes basados en máxima verosimilitud (el test de razón de verosimilitudes y el BIC) deben tomarse como aproximados; el método de factores principales no requiere normalidad. La rotación varimax, que no modifica las comunalidades, simplifica la estructura de cargas: cada variable tiende a cargar fuertemente sobre un solo factor, lo que facilita la interpretación.
+
+> *Nota: el PDF no incluye texto interpretativo para este ejercicio (solo las salidas); el párrafo de conclusiones es una redacción propia. El orden y el signo de los factores rotados son arbitrarios: la rotación determina el subespacio, y los factores se ordenaron aquí por varianza explicada, por lo que pueden aparecer en otro orden o con el signo cambiado respecto de la matriz de rotación del PDF (la matriz $C$ coincide salvo permutación y signo de las columnas).*
+
+
+# Ejercicio 3
+
+*Estimar un modelo factorial empleando la base "sachs.dta", extracto de Gallup, Sachs & Mellinger (1999).*
+
+```{r ej3-datos}
+sachs <- as.data.frame(read_dta(file.path(datos, "sachs.dta")))
+vars3 <- c("gdp95", "lnd100km", "pop100km", "lnd100cr", "pop100cr", "dens95c", "dens95i",
+           "airdist", "ciffob95", "landarea", "open6590", "urbpop95", "pop95")
+X3 <- sachs[complete.cases(sachs[vars3]), vars3]
+dim(X3)
+bic3 <- bic_factores(X3, 1:8)
+tabla(bic3, d = 3)
+factors3 <- bic3$Factores[which.min(bic3$BIC)]
+```
+
+El número de factores resultantes del proceso de selección de modelos introducido por Schwarz (1978) es `r factors3`.
+
+```{r ej3-norm}
+tabla_mv(mv_normalidad(X3))
+```
+
+Por lo tanto, con un nivel de significancia del 1%, estos datos aportan evidencia suficiente para indicar que no tienen una distribución normal multivariada.
+
+```{r ej3-fa}
+fa3 <- fa_modelo(X3, factors3, "pf")
+tabla(fa3$tab_ev, d = 5)
+tabla(cbind(fa3$L, Uniqueness = fa3$psi), d = 4)
+```
+
+```{r ej3-plot1, fig.height = 6.5}
+loadingplot_r(fa3$L, "Factor loadings (sin rotar)")
+```
+
+```{r ej3-rot, fig.height = 6.5}
+tabla(fa3$rot$T, d = 4)
+loadingplot_r(fa3$rot$L, "Factor loadings (rotación varimax ortogonal)")
+tabla(cbind(fa3$rot$L, Commonality = 1 - fa3$psi), d = 4)
+tabla(fa3$B_rotado, d = 5)
+```
+
+**Interpretación de los factores rotados.**
+
+- **Factor 1:** carga alta en la tierra y la población a menos de 100 km de la costa (`lnd100km`, `pop100km`, `lnd100cr`, `pop100cr`, con cargas de 0,82 a 0,95): se interpreta como un factor de *geografía costera*.
+- **Factor 2:** carga alta en el PIB de 1995, la apertura comercial y la población urbana (`gdp95` 0,90, `open6590` 0,83, `urbpop95` 0,74) y carga negativa en la distancia a los centros de comercio (`airdist` -0,68, `ciffob95` -0,57): se interpreta como un factor de *desarrollo económico y proximidad a los mercados*.
+- **Factor 3:** pondera sobre todo la superficie del país (`landarea` 0,64) y, en menor medida, la población: factor de *tamaño*.
+- **Factor 4:** pondera la densidad de población en el interior (`dens95i` 0,57): factor de *densidad poblacional*.
+
+La densidad de población en la costa (`dens95c`) es la variable peor explicada por el modelo (comunalidad de `r fmt(1 - fa3$psi["dens95c"], 3)`).
+
+> *Nota: el PDF no incluye texto interpretativo para este ejercicio; la interpretación de arriba es una redacción propia a partir de las cargas rotadas de la tabla.*
+
+
+# Ejercicio 4
+
+*En base a los datos empleados por la Fundación Heritage para construir el Freedom Index 2010, contenidos en la base "heritage.dta", ajustar un modelo factorial y comentar, brevemente, los resultados obtenidos.*
+
+```{r ej4-datos}
+heritage <- as.data.frame(read_dta(file.path(datos, "heritage.dta")))
+vars4 <- c("propertyrights", "judicaleffectiveness", "governmentintegrity", "taxburden",
+           "govtspending", "fiscalhealth", "businessfreedom", "laborfreedom", "monetaryfreedom",
+           "tradefreedom", "investmentfreedom", "financialfreedom")
+X4 <- heritage[complete.cases(heritage[vars4]), vars4]
+c(`Observaciones totales` = nrow(heritage), `Observaciones completas` = nrow(X4))
+bic4 <- bic_factores(X4, 1:7)
+tabla(bic4, d = 3)
+factors4 <- bic4$Factores[which.min(bic4$BIC)]
+```
+
+El número de factores resultantes del proceso de selección de modelos introducido por Schwarz (1978) es `r factors4`.
+
+```{r ej4-norm}
+tabla_mv(mv_normalidad(X4))
+```
+
+Por lo tanto, con un nivel de significancia del 1%, estos datos aportan evidencia suficiente para indicar que no tienen una distribución normal multivariada.
+
+```{r ej4-fa}
+fa4 <- fa_modelo(X4, factors4, "pf")
+tabla(fa4$tab_ev, d = 5)
+tabla(cbind(fa4$L, Uniqueness = fa4$psi), d = 4)
+```
+
+```{r ej4-plot1, fig.height = 6.5}
+loadingplot_r(fa4$L, "Factor loadings (sin rotar)")
+```
+
+```{r ej4-rot, fig.height = 6.5}
+tabla(fa4$rot$T, d = 4)
+loadingplot_r(fa4$rot$L, "Factor loadings (rotación varimax ortogonal)")
+tabla(cbind(fa4$rot$L, Commonality = 1 - fa4$psi), d = 4)
+tabla(fa4$B_rotado, d = 5)
+```
+
+**Comentario de los resultados.**
+
+- **Número de factores y varianza explicada:** el criterio de Schwarz elige `r factors4` factores, que explican en conjunto `r fmt(100 * mean(1 - fa4$psi), 3)`% de la varianza total de las 12 variables (promedio de las comunalidades). La "proporción" de la tabla de autovalores (por ejemplo, 79,4% para el primer factor) se calcula, como en Stata, sobre la suma de todos los autovalores de la matriz reducida, que incluye autovalores negativos; por eso el acumulado supera 100% y no debe leerse como porcentaje de la varianza total.
+- **Factor 1 (instituciones y libertad de empresa):** carga alta en los derechos de propiedad, la integridad del gobierno, la eficacia judicial y la libertad empresarial (cargas de 0,79 a 0,86), y moderada en la libertad financiera y comercial. Agrupa los indicadores del *estado de derecho y el entorno para hacer negocios*.
+- **Factor 2 (apertura económica y financiera):** carga alta en la libertad de inversión (0,76) y financiera (0,69), y moderada en la monetaria (0,54) y comercial (0,45): *integración con los mercados de capitales y de bienes*.
+- **Factor 3 (tamaño y carga fiscal del Estado):** carga alta en la carga impositiva (0,71) y el gasto público (0,54), y moderada en la libertad laboral (0,35): *peso fiscal del Estado*.
+- **Ajuste:** las variables mejor explicadas son los derechos de propiedad, la integridad del gobierno y la libertad de inversión y financiera (comunalidades de 0,75 a 0,85); la salud fiscal (`fiscalhealth`) es la peor explicada (comunalidad de `r fmt(1 - fa4$psi["fiscalhealth"], 3)`), de modo que no está bien representada por estos tres factores comunes.
+- **Supuestos:** los datos no son normales multivariados (se rechaza al 1% con los cuatro tests), por lo que los tests y criterios basados en máxima verosimilitud (como el BIC usado para elegir el número de factores) son aproximados.
+
+> *Nota: el PDF no incluye texto de comentarios para este ejercicio (solo las salidas y la selección de 3 factores); la interpretación de arriba es una redacción propia a partir de las cargas rotadas de la tabla.*

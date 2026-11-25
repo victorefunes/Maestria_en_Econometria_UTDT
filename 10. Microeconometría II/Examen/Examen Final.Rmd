@@ -1,0 +1,553 @@
+---
+title: "Examen Final — Propiedades de muestra finita de los estimadores de diferencia en diferencias"
+subtitle: "Microeconometría II · Maestría en Econometría UTDT"
+lang: es
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+---
+
+```{r setup, include=FALSE}
+# error = TRUE: si un chunk falla (por ejemplo, falta un paquete), el documento
+# igual se genera y muestra el error en ese lugar.
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, error = TRUE)
+
+# La simulación completa (2 tamaños de muestra x 15 períodos x 3 ATT x 100 réplicas x 8
+# estimaciones) tarda HORAS. Por defecto NO se corre al tejer este documento.
+# Poné eval_sim <- TRUE para ejecutarla (escribe en Datos/ y Figuras/ con sufijo _R).
+eval_sim <- FALSE
+```
+
+Este documento combina el **enunciado** (`Examen Final (P).pdf`), la **resolución** de `Examen Final (R).pdf` (con las figuras y tablas de Stata) y el **código en R** (`Datos/Examen Final.R`, convertido desde `Examen Final.do`), y marca las **discrepancias**. Para este examen no hay PDF `(S)`.
+
+> ⚠️ **DISCREPANCIA** marca todo lo que no coincide o falta entre enunciado, paper de Weiss, resolución y código.
+> ✅ marca lo que verifiqué y está bien.
+> 💡 marca una **propuesta o hipótesis mía** (no está en los PDFs).
+> El código **no se ejecutó** (R no está disponible en esta máquina). Los números de Stata vienen de (R).pdf. Las cuentas "a mano" usan el código del `.do`, no resultados corridos.
+> Las rutas de los chunks y las imágenes son relativas a la carpeta de este documento (`Examen/`).
+
+---
+
+## Resumen de discrepancias
+
+| # | Dónde | Qué pasa | Gravedad |
+|---|-------|----------|----------|
+| 1 | Ej. 1, 2, 3 y 5 (modelo heterogéneo) | Los resultados **no replican a Weiss**: en el paper solo TWFE tiene sesgo; acá **CS, BJS y JW** tienen un sesgo mucho mayor (hasta ≈ −3) y las tres curvas **coinciden**, lo que indica que estiman el mismo objeto. (R) lo reconoce, pero atribuye la diferencia a "menos simulaciones o un `g_het` mal definido". Las cuentas de abajo apuntan a **otra causa** (ver #2 y #3). | Alta |
+| 2 | `.do` líneas 96–100 (`tau`) | Además de `tau = (id − N/2)·(ATT/mean_effect)`, el `.do` agrega **−10·ATT a las unidades tratadas con menor id (el 20% de los tratados, las que se tratan más temprano) y +50·ATT a las de id > 0,98·N (2% de la muestra)**. Netean cero en el promedio **por unidad**, pero los estimadores modernos (CS simple, BJS, JW) promedian **por observación tratada**, y las unidades tratadas más temprano tienen más períodos. Resultado: el efecto promedio **por observación** no es el ATT que se usa como "verdadero". Para N = 50, T = 30 esto da (a mano) un sesgo teórico de ≈ −2,82·ATT (−0,56; −1,41; −2,26), muy parecido a las figuras. | Alta |
+| 3 | `.do` líneas 92–93 (`delta`, `g_het`) | `delta = round((N/2)/(T−1))` hace que, para varios T, algunas unidades "tratadas" tengan `g_het > T` y **nunca se traten dentro de la muestra** (N = 50: 1 unidad con T = 4; 3 con T = 12; 8 con T = 18; 6 con T = 20; 4 con T = 22; 2 con T = 24). Eso contradice a Weiss ("exactamente 25 de 50 unidades entran en tratamiento") y probablemente **explica los dientes de sierra** de las figuras heterogéneas. | Alta |
+| 4 | Ej. 5, (R) | Dice que con N = 500 "todos los estimadores parecen más insesgados (el sesgo se encuentra más cercano a 0)". Eso vale para el caso **constante**; con efectos **heterogéneos** el sesgo de CS/BJS/JW **no baja** (sigue ≈ −3 para ATT = 0,8). Un sesgo que no se reduce con N no es ruido de simulación, así que tampoco se explica por las 100 réplicas. | Alta |
+| 5 | Ej. 1, (R) | La pregunta pide ver el **sesgo por ponderadores negativos de TWFE** (de Chaisemartin y D'Haultfœuille). (R) responde que "todos los estimadores tienen sesgo": no distingue el de TWFE, que en las figuras es **menor** que el de CS/BJS/JW. | Media |
+| 6 | Descripción de los datos, (R) | Dice `Post = 1 si t > g`; el `.do` usa `t >= g` (`Post_hom` y `Post_het`), que es lo coherente con Weiss (g = primer período tratado). Además cita "las líneas 91 a 94" para `tau`, pero en el `.do` actual `tau` está en las **96–100**. | Baja |
+| 7 | Ej. 3, `.do` | La potencia usa `2*ttail(N−1, |t|)`, mientras que la cobertura usa 1,96 (normal). Weiss usa intervalos de Wald con 1,96 para ambos. | Baja |
+| 8 | Ej. 2 y 3 | Con 100 réplicas, la cobertura tiene un error de simulación de ≈ ±0,02 y la potencia de hasta ±0,05, así que muchas "tendencias" que comenta (R) (p. ej. 0,92 → 0,97 → 0,89) son ruido. | Baja |
+| 9 | Ej. 4 (Bonus), (R) | **Sin respuesta** (no es obligatorio). El `.do` no calcula block bootstrap ni wild bootstrap. | Baja |
+| 10 | Código R | El script en R **pisaba los PNG de Stata** (mismos nombres en `Figuras/`). **Corregido**: ahora agrega el sufijo `_R`. Además, `did`, `didimputation` y `etwfe` no son idénticos a `csdid`, `did_imputation` y `jwdid` (BJS `minn(0)` no tiene equivalente), así que los números no serán los de Stata. | Media (ya corregida) |
+
+---
+
+## Enunciado y reglas
+
+**(P)** Se estudian las propiedades de muestra finita de cuatro estimadores de DiD con efectos heterogéneos: **TWFE, CS** (Callaway y Sant'Anna), **BJS** (Borusyak, Jaravel y Spiess) y **JW** (Wooldridge). Se replica la generación de datos de la sección 4.2 de Weiss, con semilla = últimos 5 dígitos del documento (acá **02205**), y se piden:
+
+1. Figura 3 (sesgo del ATT). ¿Se encuentra el sesgo por ponderadores negativos de TWFE con efectos heterogéneos?
+2. Figura 5 (sesgo del error estándar) y Tabla 3 (probabilidad de cobertura).
+3. Figura 11 (potencia).
+4. **Bonus:** errores estándar por block bootstrap (Tabla 4 de Weiss) y, para CS, wild bootstrap.
+5. Repetir todo con N = 500 en lugar de 50 y comentar qué se aprende.
+
+**Parámetros (`.do`):** 100 réplicas, modelos homogéneo y heterogéneo, T = 2, 4, …, 30, ATT = 0,2; 0,5; 0,8.
+
+---
+
+## Generación de datos (DGP)
+
+**(R)** Describe el panel N×T con efectos fijos por individuo (`alpha = id/10`) y por período (`gamma`), error normal, `Treated = 1` para el 50% de mayor `id`, y las cohortes:
+
+- **Homogéneo:** cohorte aleatoria en {2, …, T}; $Y_{it}=\beta D_{it}+\alpha_i+\gamma_t+\epsilon_{it}$.
+- **Heterogéneo:** cohorte **no aleatoria**, función del `id` (mismo número de unidades por cohorte); $Y_{it}=\tau_i D_{it}+\alpha_i+\gamma_t+\epsilon_{it}$.
+
+**Weiss (sección 4.2, páginas 12–13):** con efectos heterogéneos, $\tau_i$ se genera **de modo que el ATT sea igual a $\beta$**, pero crecen monótonamente con el período de primer tratamiento (los tratados más temprano tienen efectos extremos, posiblemente negativos, compensados por los adoptantes tardíos). "En todas las simulaciones, **exactamente 25 de 50 unidades entran eventualmente en tratamiento**".
+
+> ⚠️ **DISCREPANCIAS #2, #3 y #6.** Ver el Resumen. (R) cuenta que consultó a Weiss y que `tau` se construye "como se puede ver en las líneas 91 a 94"; en el `.do` actual esas líneas son otras, y `tau` incluye dos ajustes extra (líneas 99–100) que el paper no describe. Abajo se verifican con código.
+
+```{r dgp-params}
+library(fixest)
+library(did)
+library(didimputation)
+library(etwfe)
+library(haven)
+
+seed <- 2205                        # semilla del .do (02205)
+
+# Globales
+reps    <- 100                      # repeticiones por celda (N, T, ATT)
+models  <- c("hom", "het")
+estims  <- c("twfe", "cs", "bjs", "jw")
+samples <- c(50, 500)
+periods <- seq(2, 30, by = 2)
+ATTs    <- c(0.2, 0.5, 0.8)
+results <- c("figure3", "figure5", "table3", "figure11")
+
+conf  <- 0.95
+alpha <- 1 - conf
+z     <- qnorm(1 - alpha / 2)
+
+# Stata: round(x) redondea .5 hacia arriba
+redondear <- function(x) floor(x + 0.5)
+
+dir_datos <- "Datos"                # los resultados propios se guardan con sufijo _R
+dir_fig   <- "Figuras"              # para no pisar los .dta / .png de Stata
+```
+
+### Verificación del DGP con código (agregado)
+
+```{r dgp-diagnostico}
+# AGREGADO (no está en el .do ni en el .R original). Replica solo la parte de GENERACIÓN
+# de datos de "simulation()" (sin estimar) para verificar tres cosas del DGP heterogéneo.
+generar_dgp <- function(N, T, att) {
+  d <- data.frame(id = rep(1:N, each = T), t = rep(1:T, times = N))
+  d$Treated <- as.numeric(d$id > N / 2)
+
+  delta <- redondear((N / 2) / (T - 1))
+  d$g_het <- ifelse(d$Treated == 1, 2 + trunc((d$id - (N / 2 + 1)) / delta), 0)
+  mean_effect <- mean(d$id[d$g_het > 0] - N / 2)
+  d$tau <- 0
+  d$tau[d$Treated == 1] <- (d$id[d$Treated == 1] - N / 2) * (att / mean_effect)
+  en_rango <- d$id >= N / 2 + 1 & d$id <= N / 2 * 1.2
+  d$tau[en_rango] <- d$tau[en_rango] - 10 * att                      # línea 99 del .do
+  d$tau[d$id > N * 0.98] <- d$tau[d$id > N * 0.98] + 5 * 10 * att    # línea 100 del .do
+  d$D_het <- d$Treated * as.numeric(d$t >= d$g_het)
+  d
+}
+
+# (1) Unidades "tratadas" que nunca se tratan dentro de la ventana (g_het > T)  [#3]
+sin_tratar <- function(N, T) {
+  delta <- redondear((N / 2) / (T - 1))
+  g <- 2 + trunc((((N / 2 + 1):N) - (N / 2 + 1)) / delta)
+  sum(g > T)
+}
+data.frame(T = periods,
+           N50  = sapply(periods, function(T) sin_tratar(50, T)),
+           N500 = sapply(periods, function(T) sin_tratar(500, T)))
+# Para N = 50 debe dar: T=4 -> 1; T=12 -> 3; T=18 -> 8; T=20 -> 6; T=22 -> 4; T=24 -> 2; resto 0.
+
+# (2) ATT "por unidad" vs ATT "por observación tratada"  [#2]
+#   - Weiss: tau_i se genera para que el promedio por UNIDAD sea el ATT.
+#   - CS (simple), BJS y JW promedian sobre las OBSERVACIONES tratadas: pesan más a las
+#     unidades tratadas antes (que tienen más períodos postratamiento).
+sesgo_estimando <- function(N, T, att) {
+  d <- generar_dgp(N, T, att)
+  tau_unidad <- tapply(d$tau, d$id, mean)[as.character((N / 2 + 1):N)]
+  att_unidad <- mean(tau_unidad)                    # = att (los ajustes netean cero por unidad)
+  att_obs    <- mean(d$tau[d$D_het == 1])           # promedio por observación tratada
+  c(att_unidad = att_unidad, att_obs = att_obs, sesgo_vs_att = att_obs - att)
+}
+# Cuentas a mano (del .do): N=50, T=30 -> att_obs = -1.8235*att, sesgo = -2.8235*att
+#                           (ATT 0.2 / 0.5 / 0.8 -> -0.56 / -1.41 / -2.26)
+#                           N=500, T=30 -> sesgo ~ -3.4*att (ATT 0.8 -> ~ -2.7)
+t(sapply(ATTs, function(a) sesgo_estimando(50, 30, a)))
+t(sapply(ATTs, function(a) sesgo_estimando(500, 30, a)))
+
+# (3) Sesgo "implícito" para ATT = 0.5 a lo largo de T (N = 50): compárese con las
+#     curvas de la Figura 3 (modelo heterogéneo, ATT = 0.5)
+sesgo_T <- sapply(periods, function(T) sesgo_estimando(50, T, 0.5)[["sesgo_vs_att"]])
+plot(periods, sesgo_T, type = "b", xlab = "Time Periods", ylab = "att_obs - att",
+     main = "Sesgo implícito (N = 50, ATT = 0.5)")
+abline(h = 0, col = "red")
+```
+
+> ✅ **Qué se espera ver:** (1) los conteos de la tabla de arriba para N = 50; (2) un sesgo implícito de ≈ −0,56 / −1,41 / −2,26 para N = 50 y T = 30, y de ≈ −0,7 / −1,7 / −2,7 para N = 500; (3) una curva con **saltos** en T = 4, 12, 18–24. Los valores teóricos coinciden con las curvas de CS/BJS/JW del PDF (N = 50, T = 30: ≈ −0,6; −1,5; −2,2; N = 500: ≈ −0,7; −1,7; −3). Los números anteriores son **cuentas hechas a mano** con el código del `.do`; falta correr el chunk para confirmarlos.
+
+---
+
+## Ejercicio 1 — Figura 3: sesgo del ATT
+
+**(P)** Reproducir la Figura 3 para TWFE, CS, BJS y JW. ¿Se encuentran los mismos resultados? ¿Se encuentra el sesgo por ponderadores negativos de TWFE con efectos heterogéneos?
+
+**(R)** "Para los casos con efectos de tratamiento constantes, todos los estimadores parecen insesgados (análogo a como sucede en el paper). [...] para los casos con efectos de tratamiento heterogéneos, los resultados no son satisfactorios y, en particular, todos los estimadores tienen un importante sesgo (esto sólo sucede con TWFE en el paper)."
+
+**Figura 3 (N = 50), ATT = 0,5** — constante y heterogéneo (Stata):
+
+![](Figuras/figure3_N50_att5_hom.png){width=48%} ![](Figuras/figure3_N50_att5_het.png){width=48%}
+
+**Weiss (Figura 3):** con efectos constantes todos son insesgados; con efectos heterogéneos **solo TWFE** está sesgado (hasta ≈ −0,6 para ATT = 0,8) y los demás son insesgados.
+
+> ✅ **Verificado (constante):** coincide con el paper: sesgos cercanos a cero para los cuatro estimadores.
+>
+> ⚠️ **DISCREPANCIA #1.** En el modelo heterogéneo, (R) muestra el patrón **inverso**: CS, BJS y JW tienen un sesgo grande (≈ −1,4 con ATT = 0,5 y ≈ −2,2 con ATT = 0,8 hacia T = 30) y **las tres curvas se superponen** (en el gráfico solo se ven dos líneas: negra, TWFE, y naranja, las otras tres). Que coincidan indica que los tres estiman **el mismo objeto**, distinto del ATT que se usa como "verdadero".
+>
+> ⚠️ **DISCREPANCIA #5.** Sobre el sesgo por ponderadores negativos de TWFE: en las figuras el sesgo de TWFE es **menor** que el de los otros tres y oscila (incluso se vuelve positivo en algunos T). (R) dice que "todos tienen sesgo" sin identificar cuál es el de TWFE. Con efectos que crecen en el tiempo y pesos negativos (de Chaisemartin y D'Haultfœuille; Goodman-Bacon), lo esperable es el sesgo de **TWFE**, y que CS/BJS/JW lo corrijan.
+>
+> ⚠️ **DISCREPANCIAS #2 y #3 (explicación propuesta).** 💡 (R) atribuye la diferencia a (a) menos simulaciones (100 vs 5.000) y/o (b) un `g_het` mal definido. (a) no puede producir un sesgo **sistemático y suave** (solo ruido). (b) es parcialmente cierto (el redondeo de `delta` deja unidades que nunca se tratan, #3), pero el sesgo grande viene de que el `.do` **agrega ajustes extra a `tau`** (−10·ATT para el 20% de los tratados más tempranos y +50·ATT para las unidades con id > 0,98·N; líneas 99–100) que el paper no describe. Esos ajustes netean cero en el promedio por unidad, pero CS (simple), BJS y JW promedian **por observación tratada**, donde las unidades tratadas antes pesan más (tienen más períodos): el "efecto verdadero" a recuperar queda lejos del `att` con el que se calcula el sesgo. Con N = 50 y T = 30 esto da, a mano, un sesgo teórico de ≈ **−2,82·ATT** (−0,56; −1,41; −2,26), muy cercano a las figuras. Weiss usa un BJS "reponderado para el ATT por unidad", no el estimador por observación.
+
+---
+
+## Ejercicio 2 — Figura 5 y Tabla 3: validez de la inferencia
+
+**(P)** Reproducir la Figura 5 (sesgo del error estándar) y la Tabla 3 (cobertura).
+
+### Figura 5 (N = 50)
+
+**(R)** *Constante:* los EE de TWFE y CS parecen insesgados (CS difiere del paper, donde se va sesgando con T); los de BJS y JW tienen un sesgo (negativo) creciente con T (análogo al paper). *Heterogéneo:* los EE de todos los estimadores tienen un sesgo importante (mayor cuanto mayor el ATT); disminuye con T para BJS y JW, no para TWFE y CS (esto no sucede en el paper).
+
+![](Figuras/figure5_N50_att5_hom.png){width=48%} ![](Figuras/figure5_N50_att5_het.png){width=48%}
+
+> ✅ **Consistente con Weiss (constante):** BJS (y JW) subestiman el EE cada vez más con T.
+> ⚠️ **#1:** en el caso heterogéneo el "sesgo del EE" se mide como EE medio menos el desvío de las **estimaciones simuladas**; como estas están desplazadas respecto del ATT supuesto (#2), la comparación con el paper no es directa.
+
+### Tabla 3 (N = 50, ATT = 0,5, cobertura al 95%)
+
+**(R)**
+
+| | TWFE hom | CS hom | BJS hom | JW hom | TWFE het | CS het | BJS het | JW het |
+|---|---|---|---|---|---|---|---|---|
+| T = 2 | 0,95 | 0,93 | 0,93 | 0,95 | 1,00 | 1,00 | 1,00 | 1,00 |
+| T = 10 | 0,93 | 0,92 | 0,87 | 0,89 | 1,00 | 0,17 | 0,00 | 0,00 |
+| T = 20 | 0,95 | 0,97 | 0,76 | 0,92 | 0,14 | 0,00 | 0,00 | 0,00 |
+| T = 30 | 0,95 | 0,89 | 0,72 | 0,70 | 1,00 | 0,46 | 0,00 | 0,00 |
+
+**(R)** Constante: "la cobertura suele disminuir a medida que aumenta T (análogo al paper)". Heterogéneo: "hay muchos valores nulos (esto no sucede en el paper)".
+
+> ✅ **Verificado (constante):** TWFE queda en 0,93–0,95 y BJS cae a 0,72 (Weiss: TWFE/CR2 cerca de lo nominal; CS, DCDH y BJS bajan con T; en T = 30, CS 0,80). Los demás matices son compatibles con el error de simulación (⚠️ #8: con 100 réplicas el error es de ≈ ±0,02).
+>
+> ⚠️ **DISCREPANCIAS #1, #2, #8.** En el caso heterogéneo, los ceros de BJS y JW (y de CS desde T = 20) son consecuencia del sesgo: el intervalo se centra lejos del `att` verdadero y deja de cubrirlo. 💡 TWFE tiene cobertura 1,00, probablemente porque su error estándar es muy grande, y el 0,14 en T = 20 podría estar relacionado con que ese T deja 6 unidades sin tratar (#3); son hipótesis mías, sin verificar.
+
+```{r ej2-table3-stata}
+# AGREGADO: reconstruye la Tabla 3 desde los .dta que guardó Stata (si están disponibles).
+tabla3_stata <- function(N) {
+  d <- as.data.frame(zap_labels(read_dta(sprintf("Datos/results_N%d_matriz_table3.dta", N))))
+  per <- c(2, 10, 20, 30)
+  cols <- as.vector(sapply(models, function(m) paste0("Coverage_Proba_att5_", m, "_", estims)))
+  out <- t(sapply(per, function(p) round(unlist(d[d$T == p, cols]), 2)))
+  dimnames(out) <- list(paste0("T=", per), as.vector(sapply(models, function(m)
+    paste0(toupper(estims), "_", m))))
+  out
+}
+tabla3_stata(50)
+tabla3_stata(500)
+```
+
+---
+
+## Ejercicio 3 — Figura 11: potencia
+
+**(P)** Reproducir la Figura 11 para los cuatro estimadores.
+
+**(R)** "Para los casos con efectos de tratamiento constantes, la potencia aumenta a medida que aumenta T y también cuando el ATT es mayor (análogo al paper). [...] para los casos con efectos heterogéneos [...] hay mucha volatilidad en las series (esto no sucede en el paper)."
+
+![](Figuras/figure11_N50_att5_hom.png){width=48%} ![](Figuras/figure11_N50_att5_het.png){width=48%}
+
+> ✅ **Verificado (constante):** coherente con Weiss (potencia creciente con T y con ATT; BJS y JW por debajo de TWFE y CS).
+>
+> ⚠️ **DISCREPANCIA #1 / #3.** 💡 La "volatilidad" de las series heterogéneas probablemente tiene el mismo origen que la del sesgo: el DGP del `.do` deja unidades sin tratar en algunos T (4, 12, 18–24) y el resultado salta. Nota: la potencia del `.do` es la fracción de réplicas con $|\hat\beta/sd(\hat\beta)|$ significativo con `ttail(N−1)` y se calcula contra **ATT = 0** (como "with true variance" en Weiss), pero la cobertura usa 1,96 (⚠️ #7).
+>
+> ⚠️ **DISCREPANCIA #8.** Con 100 réplicas, cada punto de la curva de potencia tiene un error de simulación de hasta ±0,05: parte del zigzag de las figuras es ruido.
+
+---
+
+## Ejercicio 4 (Bonus) — Block bootstrap y wild bootstrap
+
+**(P)** Calcular los errores estándar por block bootstrap y reproducir la Tabla 4 de Weiss; para CS, reportar también wild bootstrap. No es obligatorio.
+
+**(R)** *(sin respuesta, el inciso está en blanco)*
+
+> ⚠️ **DISCREPANCIA #9.** Sin respuesta; el `.do` tampoco lo calcula. 💡 **Esbozo (mío, no ejecutado):** un block bootstrap para DiD remuestrea **unidades completas** (bloques = todos los períodos de cada unidad) con reposición y recalcula el estimador; el EE es el desvío estándar de las réplicas.
+
+```{r ej4-bootstrap, eval=FALSE}
+# AGREGADO (esbozo, no ejecutado): block bootstrap por unidad para TWFE.
+boot_bloques <- function(d, B = 200) {
+  ids <- unique(d$id)
+  est <- replicate(B, {
+    s  <- sample(ids, replace = TRUE)
+    dd <- do.call(rbind, lapply(seq_along(s), function(i) {
+      x <- d[d$id == s[i], ]; x$id <- i; x
+    }))
+    coef(feols(y ~ D | id + t, data = dd))[["D"]]
+  })
+  sd(est)
+}
+# Para CS con wild bootstrap: att_gt(..., bstrap = TRUE, biters = 999) del paquete 'did'
+# usa el bootstrap multiplicador (wild) sobre las funciones de influencia.
+```
+
+---
+
+## Ejercicio 5 — Repetir con N = 500
+
+**(P)** Repetir todo con N = 500. ¿Cómo cambian los resultados? ¿Qué aprendizaje deja?
+
+**(R)** "En términos generales, ante este aumento del tamaño de muestra, se puede observar que mejora (disminuye) el *ATT Bias* y el *SE Bias*, y mejora (aumenta) la *Coverage Probability* y el *Statistical Power*. [...] se tiene que, al aumentar el tamaño de muestra, mejora la estabilidad de las estimaciones y la precisión estadística [...]. Cabe aclarar que, aquí, para los casos con efectos de tratamiento heterogéneos, los resultados tampoco son satisfactorios."
+
+**Tabla 3' (N = 500, ATT = 0,5), (R):**
+
+| | TWFE hom | CS hom | BJS hom | JW hom | TWFE het | CS het | BJS het | JW het |
+|---|---|---|---|---|---|---|---|---|
+| T = 2 | 0,94 | 0,94 | 0,94 | 0,94 | 1,00 | 1,00 | 1,00 | 1,00 |
+| T = 10 | 0,93 | 0,94 | 0,95 | 0,94 | 1,00 | 0,00 | 0,00 | 0,00 |
+| T = 20 | 0,94 | 0,92 | 0,94 | 0,91 | 0,00 | 0,00 | 0,00 | 0,00 |
+| T = 30 | 0,95 | 0,97 | 0,95 | 0,94 | 1,00 | 0,00 | 0,00 | 0,00 |
+
+**Figuras (N = 500), ATT = 0,5 — Figura 3', 5' y 11' (constante y heterogéneo):**
+
+![](Figuras/figure3_N500_att5_hom.png){width=48%} ![](Figuras/figure3_N500_att5_het.png){width=48%}
+
+![](Figuras/figure5_N500_att5_hom.png){width=48%} ![](Figuras/figure5_N500_att5_het.png){width=48%}
+
+![](Figuras/figure11_N500_att5_hom.png){width=48%} ![](Figuras/figure11_N500_att5_het.png){width=48%}
+
+> ✅ **Verificado (constante):** con N = 500 todo mejora como dice (R): el sesgo del ATT y del EE se acercan a 0, la cobertura queda en 0,91–0,97 (≈ 0,95) y la potencia llega a 1 incluso para T chicos. Es el comportamiento esperable (el error de muestreo baja con N).
+>
+> ⚠️ **DISCREPANCIA #4.** Para el modelo **heterogéneo**, el sesgo de CS/BJS/JW **no se reduce** con N = 500: sigue en ≈ −0,7 / −1,7 / −3 (ATT = 0,2 / 0,5 / 0,8) hacia T = 30, y las coberturas de CS, BJS y JW son 0,00 ya desde T = 10. (R) afirma que "todos los estimadores parecen más insesgados" en la Figura 3'; eso solo es cierto en la fila de efectos constantes. 💡 Un sesgo que **no cae al crecer N** (y ya con 100 réplicas es nítido) no es de muestra finita ni de pocas simulaciones: indica que el **estimando** no es el `att` del DGP (ver #2 y #3). Con N = 500 la cuenta a mano da ≈ −3,4·ATT en T = 30 (≈ −2,7 para ATT = 0,8), muy parecido a la figura.
+>
+> 💡 **Aprendizaje (mío, para completar la respuesta de (R)):** (i) TWFE, CS, BJS y JW son todos consistentes y convergen cuando el efecto es constante; (ii) con efectos heterogéneos, **el objeto estimado depende de cómo cada método pondera** (por unidad, por cohorte o por observación), y comparar contra un ATT que pondera distinto produce un "sesgo" que no se va con N; (iii) la cobertura nominal y la potencia mejoran con N solo si el sesgo es cero; (iv) hay que verificar que el DGP respete la descripción del paper (25 de 50 unidades que realmente se tratan, ATT por unidad).
+
+---
+
+## Código en R
+
+El código completo está en `Datos/Examen Final.R`. Abajo, el mismo código dividido en bloques. **Los bloques largos están desactivados** (`eval = eval_sim`, por defecto `FALSE`): para correrlos, poné `eval_sim <- TRUE` en el primer chunk (tarda horas).
+
+### Una réplica de la simulación
+
+```{r simulacion}
+# Una réplica: genera los datos y devuelve ATT y EE de cada modelo/estimador
+simulation <- function(N, T, att) {
+  NT <- N * T
+  d <- data.frame(id = rep(1:N, each = T), t = rep(1:T, times = N))
+
+  # Efectos fijos por id y por t, y error
+  d$alpha   <- d$id / 10
+  d$gamma   <- rnorm(T)[d$t]
+  d$epsilon <- rnorm(NT)
+
+  # Modelo homogéneo
+  d$Treated <- as.numeric(d$id > N / 2)
+  g_id <- ifelse(1:N > N / 2, 1 + ceiling(runif(N) * (T - 1)), 0)
+  d$g_hom <- g_id[d$id]
+  d$g_hom_m <- ifelse(d$g_hom == 0, NA, d$g_hom)
+  d$D_hom <- d$Treated * as.numeric(d$t >= d$g_hom)
+
+  # Modelo heterogéneo
+  delta <- redondear((N / 2) / (T - 1))
+  d$g_het <- ifelse(d$Treated == 1, 2 + trunc((d$id - (N / 2 + 1)) / delta), 0)
+  d$g_het_m <- ifelse(d$g_het == 0, NA, d$g_het)
+  mean_effect <- mean(d$id[d$g_het > 0] - N / 2)
+  d$tau <- 0
+  d$tau[d$Treated == 1] <- (d$id[d$Treated == 1] - N / 2) * (att / mean_effect)
+  en_rango <- d$id >= N / 2 + 1 & d$id <= N / 2 * 1.2
+  d$tau[en_rango] <- d$tau[en_rango] - 10 * att
+  d$tau[d$id > N * 0.98] <- d$tau[d$id > N * 0.98] + 5 * 10 * att
+  d$D_het <- d$Treated * as.numeric(d$t >= d$g_het)
+
+  # Variable dependiente
+  d$y_hom <- att * d$D_hom + d$alpha + d$gamma + d$epsilon
+  d$y_het <- d$tau * d$D_het + d$alpha + d$gamma + d$epsilon
+
+  out <- c()
+  seguro <- function(expr) tryCatch(suppressWarnings(suppressMessages(expr)),
+                                    error = function(e) c(NA_real_, NA_real_))
+
+  for (model in models) {
+    dd <- d
+    dd$y  <- dd[[paste0("y_", model)]]
+    dd$D  <- dd[[paste0("D_", model)]]
+    dd$g  <- dd[[paste0("g_", model)]]
+    dd$gm <- dd[[paste0("g_", model, "_m")]]
+
+    # TWFE
+    r <- seguro({
+      m <- feols(y ~ D | id + t, data = dd, cluster = ~id)
+      c(coef(m)[["D"]], se(m)[["D"]])
+    })
+    out[paste0("att_", model, "_twfe")] <- r[1]; out[paste0("se_", model, "_twfe")] <- r[2]
+
+    # CS (Callaway-Sant'Anna, método regresión, grupo de control nunca tratados)
+    r <- seguro({
+      res <- att_gt(yname = "y", tname = "t", idname = "id", gname = "g", data = dd,
+                    est_method = "reg", control_group = "nevertreated",
+                    bstrap = FALSE, cband = FALSE)
+      ag <- aggte(res, type = "simple", na.rm = TRUE, bstrap = FALSE, cband = FALSE)
+      c(ag$overall.att, ag$overall.se)
+    })
+    out[paste0("att_", model, "_cs")] <- r[1]; out[paste0("se_", model, "_cs")] <- r[2]
+
+    # BJS (Borusyak-Jaravel-Spiess, imputación)
+    r <- seguro({
+      m <- did_imputation(data = dd, yname = "y", gname = "gm", tname = "t", idname = "id")
+      c(m$estimate[1], m$std.error[1])
+    })
+    out[paste0("att_", model, "_bjs")] <- r[1]; out[paste0("se_", model, "_bjs")] <- r[2]
+
+    # JW (Wooldridge, ETWFE, grupo de control nunca tratados, efectos fijos de grupo)
+    r <- seguro({
+      m <- etwfe(fml = y ~ 0, tvar = t, gvar = g, data = dd, cgroup = "never")
+      e <- emfx(m, type = "simple")
+      c(e$estimate[1], e$std.error[1])
+    })
+    out[paste0("att_", model, "_jw")] <- r[1]; out[paste0("se_", model, "_jw")] <- r[2]
+  }
+  out
+}
+```
+
+```{r demo-una-replica, eval=eval_sim}
+# Prueba rápida (una sola réplica, N = 50, T = 10, ATT = 0.5)
+set.seed(seed)
+round(simulation(50, 10, 0.5), 4)
+```
+
+### Simulaciones completas
+
+```{r simulaciones, eval=eval_sim}
+# Filas en el mismo orden que el .do: modelo > estimador > ATT
+filas <- unlist(lapply(models, function(m)
+  unlist(lapply(estims, function(e)
+    paste0("att", round(ATTs * 10), "_", m, "_", e)))))
+
+nombre_res <- c(figure3 = "ATT_Bias", figure5 = "SE_Bias",
+                table3 = "Coverage_Proba", figure11 = "Statistical_Power")
+
+for (N in samples) {
+
+  mats <- list()
+  for (r in results) {
+    mats[[r]] <- matrix(NA_real_, nrow = length(filas), ncol = length(periods),
+                        dimnames = list(paste0(nombre_res[r], "_", filas),
+                                        paste0("T_", periods)))
+  }
+  base <- list()
+
+  for (i in seq_along(periods)) {
+    T <- periods[i]
+    for (att in ATTs) {
+      att_aux <- round(att * 10)
+      cat(sprintf("Simulación: N=%d - T=%d - ATT=%s\n", N, T, att))
+
+      set.seed(seed)
+      sims <- t(replicate(reps, simulation(N, T, att)))
+      base[[sprintf("T%d_att%d", T, att_aux)]] <- sims
+
+      for (m in models) for (e in estims) {
+        fila <- paste0("att", att_aux, "_", m, "_", e)
+        a <- sims[, paste0("att_", m, "_", e)]
+        s <- sims[, paste0("se_", m, "_", e)]
+        sd_att <- sd(a, na.rm = TRUE)
+
+        # Figure 3 (ATT Bias)
+        mats$figure3[paste0("ATT_Bias_", fila), i] <- mean(a, na.rm = TRUE) - att
+        # Figure 5 (SE Bias)
+        mats$figure5[paste0("SE_Bias_", fila), i] <- mean(s, na.rm = TRUE) - sd_att
+        # Table 3 (Coverage Probability)
+        ic_inf <- a - z * s; ic_sup <- a + z * s
+        mats$table3[paste0("Coverage_Proba_", fila), i] <-
+          sum(att >= ic_inf & att <= ic_sup, na.rm = TRUE) / reps
+        # Figure 11 (Statistical Power): el estadístico t usa el desvío de las
+        # estimaciones simuladas, como en el .do
+        p <- 2 * pt(abs(a / sd_att), df = N - 1, lower.tail = FALSE)
+        mats$figure11[paste0("Statistical_Power_", fila), i] <-
+          sum(p < alpha, na.rm = TRUE) / reps
+      }
+    }
+  }
+
+  # Se guarda con sufijo _R para no pisar los .dta de Stata
+  saveRDS(list(mats = mats, base = base),
+          file.path(dir_datos, sprintf("results_N%d_simulaciones_R.rds", N)))
+  for (r in results) {
+    mt <- data.frame(T = periods, t(mats[[r]]), check.names = FALSE)
+    write.csv(mt, file.path(dir_datos, sprintf("results_N%d_matriz_%s_R.csv", N, r)),
+              row.names = FALSE)
+  }
+}
+```
+
+### Figuras y Tabla 3 propias
+
+```{r figuras, eval=eval_sim}
+dir.create(dir_fig, showWarnings = FALSE, recursive = TRUE)
+
+colores <- c(twfe = "black", cs = "blue", bjs = "green", jw = "orange")
+
+for (N in samples) {
+
+  mats <- readRDS(file.path(dir_datos, sprintf("results_N%d_simulaciones_R.rds", N)))$mats
+
+  for (r in results) {
+
+    cat(sprintf("Corriendo: N=%d - result=%s\n", N, r))
+
+    if (r != "table3") {
+
+      var <- nombre_res[[r]]
+      yline <- if (r == "figure11") 0.8 else 0
+
+      for (att in ATTs) {
+        att_aux <- round(att * 10)
+        for (model in models) {
+
+          # Límites del eje Y (idénticos a los del .do): c(mínimo, máximo, paso)
+          if (r == "figure11") {
+            lim <- c(0, 1, 0.2)
+          } else if (model == "hom") {
+            lim <- if (r == "figure3") c(-0.2, 0.2, 0.1) else c(-0.1, 0.1, 0.05)
+          } else {
+            lim <- if (r == "figure3" && N == 50)       c(-4.0, 0.5, 0.5)
+                   else if (r == "figure5" && N == 50)  c(-0.3, 1.5, 0.3)
+                   else if (r == "figure3" && N == 500) c(-3.0, 0.5, 0.5)
+                   else                                  c(-0.1, 0.5, 0.1)
+          }
+          m_titulo <- if (model == "hom") "Constant Effects" else "Heterogeneous Effects"
+          # sufijo _R para no pisar los .png generados por Stata
+          arch <- file.path(dir_fig, sprintf("%s_N%d_att%d_%s_R.png", r, N, att_aux, model))
+
+          png(arch, width = 800, height = 600)
+          plot(NA, xlim = c(2, 30), ylim = lim[1:2], xaxt = "n", yaxt = "n",
+               xlab = "Time Periods", ylab = gsub("_", " ", var),
+               main = sprintf("ATT=%s - %s", att, m_titulo))
+          axis(1, at = seq(2, 30, by = 4))
+          axis(2, at = seq(lim[1], lim[2], by = lim[3]), las = 1)
+          abline(h = yline, col = "red")
+          for (e in estims) {
+            fila <- sprintf("%s_att%d_%s_%s", var, att_aux, model, e)
+            lines(periods, mats[[r]][fila, ], col = colores[[e]])
+          }
+          legend("top", legend = c("TWFE", "CS", "BJS", "JW"), col = colores,
+                 lty = 1, horiz = TRUE, bty = "n")
+          dev.off()
+        }
+      }
+
+    } else {
+
+      # TABLE 3 (ATT = 0.5; T = 2, 10, 20, 30)
+      var <- "Coverage_Proba"
+      att_aux <- 5
+      per <- c(2, 10, 20, 30)
+      tabla <- matrix(NA_real_, nrow = length(per), ncol = length(models) * length(estims),
+                      dimnames = list(paste0("T_", per),
+                                      as.vector(sapply(models, function(m)
+                                        paste0(toupper(estims), "_", m)))))
+      for (i in seq_along(per)) {
+        k <- 1
+        for (m in models) for (e in estims) {
+          fila <- sprintf("%s_att%d_%s_%s", var, att_aux, m, e)
+          tabla[i, k] <- round(mats$table3[fila, paste0("T_", per[i])], 3)
+          k <- k + 1
+        }
+      }
+      cat(sprintf("\nTable 3 (N = %d)\n", N))
+      print(tabla)
+    }
+  }
+}
+```
+
+---
+
+## Anexo
+
+- Script completo: [`Datos/Examen Final.R`](Datos/Examen%20Final.R). Ya **no pisa** los PNG de Stata (los guarda con sufijo `_R`), y guarda sus resultados como `results_N*_..._R.csv` / `.rds`.
+- Las bases de Stata (`Datos/results_N50_*.dta`, `results_N500_*.dta`) y las figuras de Stata (`Figuras/*.png`) no se modifican.
+- Material teórico: [Weiss (2024)](Material%20te%C3%B3rico/Weiss%2C%20A.%20-%20How%20Much%20Should%20We%20Trust%20Modern%20%20Difference-in-Differences%20Estimates.pdf) y [Borusyak, Jaravel y Spiess (2024)](Material%20te%C3%B3rico/Borusyak%2C%20K.%2C%20Jaravel%2C%20X.%20y%20Spiess%2C%20J.%20-%20Revisiting%20Event%20Study%20Designs%20(Robust%20and%20Efficient%20Estimation).pdf).
+- Bloques marcados "AGREGADO": verificación del DGP (unidades que nunca se tratan, ATT por unidad vs. por observación, sesgo implícito), reconstrucción de la Tabla 3 desde los `.dta` de Stata y esbozo del block bootstrap.

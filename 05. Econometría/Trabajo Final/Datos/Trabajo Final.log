@@ -1,0 +1,123 @@
+Simulación mediante estimación por MCC de modelo (1) 1 con tamaño de muestra n = 10 
+Simulación mediante estimación por MCC de modelo (1) 1 con tamaño de muestra n = 20 
+Simulación mediante estimación por MCC de modelo (1) 1 con tamaño de muestra n = 100 
+Simulación mediante estimación por MCC de modelo (1) 1 con tamaño de muestra n = 200 
+Simulación mediante estimación por MCC de modelo (1) 1 con tamaño de muestra n = 500 
+Simulación mediante estimación por MCC de modelo (1) 1 con tamaño de muestra n = 1000 
+Simulación mediante estimación por MCC de modelo (1) 1 con tamaño de muestra n = 5000 
+Simulación mediante estimación por MCC de modelo (1) 1 con tamaño de muestra n = 10000 
+Simulación mediante estimación por MCC de modelo (1) 2 con tamaño de muestra n = 10 
+Simulación mediante estimación por MCC de modelo (1) 2 con tamaño de muestra n = 20 
+Simulación mediante estimación por MCC de modelo (1) 2 con tamaño de muestra n = 100 
+Simulación mediante estimación por MCC de modelo (1) 2 con tamaño de muestra n = 200 
+Simulación mediante estimación por MCC de modelo (1) 2 con tamaño de muestra n = 500 
+Simulación mediante estimación por MCC de modelo (1) 2 con tamaño de muestra n = 1000 
+Simulación mediante estimación por MCC de modelo (1) 2 con tamaño de muestra n = 5000 
+Simulación mediante estimación por MCC de modelo (1) 2 con tamaño de muestra n = 10000 
+Simulación mediante estimación por MCC de modelo (1) 3 con tamaño de muestra n = 10 
+Simulación mediante estimación por MCC de modelo (1) 3 con tamaño de muestra n = 20 
+Simulación mediante estimación por MCC de modelo (1) 3 con tamaño de muestra n = 100 
+Simulación mediante estimación por MCC de modelo (1) 3 con tamaño de muestra n = 200 
+Simulación mediante estimación por MCC de modelo (1) 3 con tamaño de muestra n = 500 
+Simulación mediante estimación por MCC de modelo (1) 3 con tamaño de muestra n = 1000 
+Simulación mediante estimación por MCC de modelo (1) 3 con tamaño de muestra n = 5000 
+Simulación mediante estimación por MCC de modelo (1) 3 con tamaño de muestra n = 10000 
+Simulación mediante estimación por MCC de modelo (1) 4 con tamaño de muestra n = 10 
+Simulación mediante estimación por MCC de modelo (1) 4 con tamaño de muestra n = 20 
+Simulación mediante estimación por MCC de modelo (1) 4 con tamaño de muestra n = 100 
+Simulación mediante estimación por MCC de modelo (1) 4 con tamaño de muestra n = 200 
+Simulación mediante estimación por MCC de modelo (1) 4 con tamaño de muestra n = 500 
+Simulación mediante estimación por MCC de modelo (1) 4 con tamaño de muestra n = 1000 
+Simulación mediante estimación por MCC de modelo (1) 4 con tamaño de muestra n = 5000 
+Simulación mediante estimación por MCC de modelo (1) 4 con tamaño de muestra n = 10000 
+Simulación mediante estimación por MCC de modelo (1) 5 con tamaño de muestra n = 10 
+Simulación mediante estimación por MCC de modelo (1) 5 con tamaño de muestra n = 20 
+Simulación mediante estimación por MCC de modelo (1) 5 con tamaño de muestra n = 100 
+Simulación mediante estimación por MCC de modelo (1) 5 con tamaño de muestra n = 200 
+Simulación mediante estimación por MCC de modelo (1) 5 con tamaño de muestra n = 500 
+Simulación mediante estimación por MCC de modelo (1) 5 con tamaño de muestra n = 1000 
+Simulación mediante estimación por MCC de modelo (1) 5 con tamaño de muestra n = 5000 
+Simulación mediante estimación por MCC de modelo (1) 5 con tamaño de muestra n = 10000 
+Simulación mediante estimación por MCC de modelo (1) 6 con tamaño de muestra n = 10 
+Simulación mediante estimación por MCC de modelo (1) 6 con tamaño de muestra n = 20 
+Simulación mediante estimación por MCC de modelo (1) 6 con tamaño de muestra n = 100 
+Simulación mediante estimación por MCC de modelo (1) 6 con tamaño de muestra n = 200 
+Simulación mediante estimación por MCC de modelo (1) 6 con tamaño de muestra n = 500 
+Simulación mediante estimación por MCC de modelo (1) 6 con tamaño de muestra n = 1000 
+Simulación mediante estimación por MCC de modelo (1) 6 con tamaño de muestra n = 5000 
+Simulación mediante estimación por MCC de modelo (1) 6 con tamaño de muestra n = 10000 
+        n_10 n_20 n_100 n_200 n_500 n_1000 n_5000 n_10000
+model_1 4.95 5.10  5.05  4.50  4.85   5.75   4.60    4.70
+model_2 5.15 4.75  4.60  4.55  5.00   5.45   5.40    4.80
+model_3 5.15 5.15  4.75  5.70  4.90   5.40   6.20    5.35
+model_4 9.25 6.30  5.20  4.30  5.70   4.65   5.10    4.70
+model_5 5.30 5.35  4.20  4.50  4.40   4.90   4.60    4.05
+model_6 6.25 5.85  5.85  6.05  5.35   5.15   4.45    4.85
+Simulación mediante estimación por FGLS-GLS de modelo (2) con tamaño de muestra 5N = 5 
+Simulación mediante estimación por FGLS-GLS de modelo (2) con tamaño de muestra 5N = 10 
+Simulación mediante estimación por FGLS-GLS de modelo (2) con tamaño de muestra 5N = 30 
+Simulación mediante estimación por FGLS-GLS de modelo (2) con tamaño de muestra 5N = 100 
+Simulación mediante estimación por FGLS-GLS de modelo (2) con tamaño de muestra 5N = 200 
+Simulación mediante estimación por FGLS-GLS de modelo (2) con tamaño de muestra 5N = 500 
+                  5N_5_fgls   5N_5_gls  5N_10_fgls   5N_30_fgls  5N_100_fgls
+tam_test_1       12.7600000  0.9800000  33.4200000  61.28000000  79.36000000
+tam_test_5       27.1400000  4.7400000  47.6200000  70.20000000  84.12000000
+poder_test_b1_00 95.7800000 88.3200000 100.0000000 100.00000000 100.00000000
+poder_test_b1_04 78.9400000 52.5200000  98.8800000 100.00000000 100.00000000
+media_b0         -2.9676887 -2.9632913  -3.0295745  -2.98736524  -2.99396083
+mediana_b0       -2.9662328 -2.9616266  -3.0410108  -3.02294690  -3.00079469
+de_b0             6.0287859  5.3755501   3.0416783   1.63635103   0.88301564
+media_b1          0.7969338  0.7974968   0.7996867   0.79982836   0.79973936
+mediana_b1        0.7970843  0.7975112   0.7980908   0.80053452   0.79991037
+de_b1             0.2046092  0.1834035   0.1063017   0.05615795   0.03024196
+                  5N_200_fgls  5N_500_fgls
+tam_test_1        84.90000000  90.40000000
+tam_test_5        88.40000000  92.66000000
+poder_test_b1_00 100.00000000 100.00000000
+poder_test_b1_04 100.00000000 100.00000000
+media_b0          -3.01940290  -3.00791025
+mediana_b0        -3.02861769  -3.01675909
+de_b0              0.62463569   0.39371985
+media_b1           0.80060179   0.80026872
+mediana_b1         0.80051347   0.80039777
+de_b1              0.02146999   0.01343969
+Simulación mediante MCC-White de modelo (3) con tamaño de muestra n = 20 
+Simulación mediante MCC-White de modelo (3) con tamaño de muestra n = 60 
+Simulación mediante MCC-White de modelo (3) con tamaño de muestra n = 100 
+Simulación mediante MCC-White de modelo (3) con tamaño de muestra n = 200 
+Simulación mediante MCC-White de modelo (3) con tamaño de muestra n = 400 
+Simulación mediante MCC-White de modelo (3) con tamaño de muestra n = 600 
+                          n_20        n_60        n_100         n_200
+sesgo_rel_b0_r2_d1  0.23788811 0.060576640  0.034640662  0.0158724651
+sesgo_rel_b1_r2_d1  0.38132601 0.095656939  0.049937862  0.0209149149
+sesgo_rel_b2_r2_d1  0.49245892 0.112560892  0.047210994 -0.0015914169
+sesgo_rel_tot_r2_d1 1.11167304 0.268794472  0.131789517  0.0383787969
+sesgo_rel_b0_r2_d2  0.25597446 0.064597503  0.036475514  0.0166363018
+sesgo_rel_b1_r2_d2  0.43061004 0.126869997  0.072876518  0.0352509496
+sesgo_rel_b2_r2_d2  0.54500935 0.167373460  0.091412777  0.0263465686
+sesgo_rel_tot_r2_d2 1.23159386 0.358840961  0.200764810  0.0782338201
+sesgo_rel_b0_e2_d1  0.04146617 0.005005812  0.002348077  0.0002617358
+sesgo_rel_b1_e2_d1  0.11365051 0.024213840  0.009236902  0.0015300650
+sesgo_rel_b2_e2_d1  0.15055271 0.019184868 -0.006046587 -0.0276367985
+sesgo_rel_tot_e2_d1 0.30566939 0.048404520  0.017631566  0.0294285993
+sesgo_rel_b0_e2_d2  0.05776837 0.009424130  0.005263851  0.0012409800
+sesgo_rel_b1_e2_d2  0.16749549 0.057095352  0.033796133  0.0158712717
+sesgo_rel_b2_e2_d2  0.24034817 0.080947327  0.041721224  0.0013254443
+sesgo_rel_tot_e2_d2 0.46561203 0.147466809  0.080781208  0.0184376961
+                            n_400         n_600
+sesgo_rel_b0_r2_d1   7.736992e-03  0.0057448569
+sesgo_rel_b1_r2_d1   4.980392e-03  0.0010645688
+sesgo_rel_b2_r2_d1  -3.120972e-02 -0.0405719554
+sesgo_rel_tot_r2_d1  4.392710e-02  0.0473813811
+sesgo_rel_b0_r2_d2   7.915909e-03  0.0056830240
+sesgo_rel_b1_r2_d2   1.507352e-02  0.0065991866
+sesgo_rel_b2_r2_d2  -1.416215e-02 -0.0233995952
+sesgo_rel_tot_r2_d2  3.715158e-02  0.0356818058
+sesgo_rel_b0_e2_d1  -8.000665e-05  0.0006039843
+sesgo_rel_b1_e2_d1  -4.682963e-03 -0.0054342991
+sesgo_rel_b2_e2_d1  -4.399590e-02 -0.0490066063
+sesgo_rel_tot_e2_d1  4.875887e-02  0.0550448897
+sesgo_rel_b0_e2_d2   1.757979e-04  0.0005293660
+sesgo_rel_b1_e2_d2   5.330076e-03  0.0002790368
+sesgo_rel_b2_e2_d2  -2.710878e-02 -0.0317516400
+sesgo_rel_tot_e2_d2  3.261465e-02  0.0325600428

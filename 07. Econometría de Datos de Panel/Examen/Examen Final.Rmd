@@ -1,0 +1,616 @@
+---
+title: "Examen Final — Econometría de Datos de Panel"
+subtitle: "Maestrías en Economía y Econometría, UTDT — Primer Trimestre 2024"
+author: "Victor Funes"
+date: "2024"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: false
+---
+
+```{r setup, include=FALSE, cache=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = TRUE, message = FALSE, warning = FALSE, cache = FALSE)
+library(haven)     # lectura de .dta
+library(plm)       # efectos fijos / aleatorios
+library(sandwich)  # errores estándar robustos
+library(lmtest)    # coeftest
+library(MASS)      # ginv
+library(parallel)  # simulaciones en paralelo
+library(knitr)
+
+SEED <- 2205                                   # semilla del .do (global seed)
+REPS <- 1000                                   # replicaciones Monte Carlo / bootstrap
+ncl  <- max(1, detectCores() - 1)              # nucleos para las simulaciones
+
+# Diferencia maxima absoluta entre lo estimado en R y lo reportado en el PDF
+dif <- function(est, pdf) signif(max(abs(unname(est) - pdf)), 3)
+
+# Simulaciones en paralelo: ejecuta fun(i), i = 1..reps, en un cluster (flujos RNG independientes y reproducibles)
+pmc <- function(reps, fun, seed = SEED) {
+  cl <- makeCluster(ncl); on.exit(stopCluster(cl))
+  clusterSetRNGStream(cl, seed)
+  fn <- Filter(function(n) is.function(get(n, globalenv())), ls(globalenv()))
+  clusterExport(cl, c(fn, "SEED", "REPS"), envir = globalenv())
+  clusterEvalQ(cl, library(MASS))
+  do.call(rbind, parLapply(cl, seq_len(reps), fun))
+}
+```
+
+> **Cómo leer este documento.** Reúne (i) el enunciado de *Examen Final (P).pdf*, (ii) la resolución de *Examen Final (R).pdf* y (iii) una **replicación en R** (todo el documento usa **sólo R**; el `Datos/Examen Final.do` de Stata sirvió de guía). Los bloques `{r}` se ejecutan al tejer y leen `Datos/cigs.dta`; las Partes 1 y 2 generan sus propios datos por simulación.
+> Las simulaciones usan **1000 réplicas** y se ejecutan **en paralelo**; los chunks pesados tienen `cache = TRUE`, así que la primera vez el tejido tarda varios minutos y las siguientes es inmediato. Los números aleatorios de R **difieren de los de Stata**, por lo que los resultados coinciden sólo en magnitud y en conclusiones (no al decimal); la comparación con las tablas del PDF R es cualitativa.
+> Las inconsistencias entre enunciado, código, resolución y replicación están marcadas con **⚠️ DISCREPANCIA**. Al final hay una tabla resumen.
+
+---
+
+# Primera parte: Propiedades de muestra finita en paneles no balanceados
+
+**Enunciado.** Considere el siguiente modelo:
+
+$$y^*_{jt}=\beta x_{jt}+c_j+u_{jt},\qquad s^*_{jt}=\gamma_1 w_{jt}+\gamma_2 z_{jt}+\alpha_j+\epsilon_{jt},\qquad s_{jt}=1\{s^*_{jt}>0\},\qquad y_{jt}=y^*_{jt}\times s_{jt}$$
+
+con $j=1,\dots,N$; $t=1,\dots,T$. Las dos variables de la ecuación de selección ($w$ y $z$) son independientes y normales estándar. La única variable de la ecuación de interés es $x_{jt}=w_{jt}$ (por lo tanto hay una variable excluida). El error idiosincrático de selección, $\epsilon_{jt}$, es normal estándar; el de la ecuación de interés es $u_{jt}=0{,}6\,\epsilon_{jt}+0{,}8\,\psi_1$ ($\psi_1$ normal estándar independiente), de modo que la correlación entre ambos errores es 0,6. Además se definen $\psi_2,\psi_3,\psi_4$ específicas de corte transversal, independientes y normales estándar. Tres modelos:
+
+- **Modelo A** (efectos correlacionados entre ecuaciones): $\alpha_j=\psi_2+\psi_4$, $c_j=\psi_3+\psi_4$.
+- **Modelo B** (efectos correlacionados con las observables, no entre ecuaciones): $\alpha_j=\psi_2+\frac{z_{j1}+z_{j2}}{2}$, $c_j=\psi_3+\frac{x_{j1}+x_{j2}}{2}$.
+- **Modelo C** (ambos tipos de correlación): $\alpha_j=\psi_2+\frac{z_{j1}+z_{j2}}{2}+\psi_4$, $c_j=\psi_3+\frac{x_{j1}+x_{j2}}{2}+\psi_4$.
+
+Todos los parámetros son uno ($\beta=\gamma_1=\gamma_2=1$). $N=20,40,100$ y $T=2,10$.
+
+> **⚠️ DISCREPANCIA 1 (menor, enunciado).** El enunciado se refiere a "la ecuación de interés (8)" cuando es la ecuación (1); el modelo (8) aparece recién en la Segunda parte. Además, el `.do` comenta "Chamberlain (1978)" en un lugar y "(1980)" en otro (la referencia es Chamberlain, 1980).
+
+## Generación de datos y estimador de Wooldridge (1995) – Mundlak
+
+El `.do` implementa el estimador de Wooldridge (1995) bajo el enfoque de Mundlak así: para la **ecuación de interés**, un probit de $s$ sobre $(x,\bar x_j)$, razón de Mills inversa $\hat\lambda_{jt}=\phi(\hat z)/\Phi(\hat z)$ y la regresión de $y$ sobre $x$, $\bar x_j$ y $\hat\lambda_{jt}$ interactuada con dummies de período (con errores robustos); para la **ecuación de selección**, lo mismo con un probit sobre $(w,z,\bar w,\bar z)$ y la regresión de la variable continua $s=s^*\cdot s_{obs}$.
+
+```{r p1-funciones}
+# Generacion de los datos (arreglos N x T); efectos de los tres modelos
+gen1 <- function(N, T) {
+  M <- function() matrix(rnorm(N * T), N, T)
+  w <- M(); z <- M(); x <- w; eps <- M(); psi1 <- M(); u <- 0.6 * eps + 0.8 * psi1
+  psi2 <- rnorm(N); psi3 <- rnorm(N); psi4 <- rnorm(N)
+  zb <- (z[, 1] + z[, 2]) / 2; xb <- (x[, 1] + x[, 2]) / 2         # promedios de los dos primeros periodos (constantes en t)
+  list(w = w, z = z, x = x, eps = eps, u = u, N = N, T = T,
+       eff = list(A = list(alpha = psi2 + psi4,      c = psi3 + psi4),
+                  B = list(alpha = psi2 + zb,        c = psi3 + xb),
+                  C = list(alpha = psi2 + zb + psi4, c = psi3 + xb + psi4)))
+}
+# Variables dependientes de un modelo dados (beta, gamma1, gamma2) y las innovaciones de seleccion
+resp1 <- function(g, model, beta = 1, g1 = 1, g2 = 1, eps = g$eps) {
+  e <- g$eff[[model]]
+  ystar <- beta * g$x + e$c + g$u; sstar <- g1 * g$w + g2 * g$z + e$alpha + eps     # c y alpha se recicla por filas (individuo)
+  sobs <- (sstar > 0) * 1
+  list(y = ystar * sobs, s = sstar * sobs, sobs = sobs)
+}
+# Wooldridge (1995), Mundlak: devuelve beta, gamma1, gamma2 (y, si se pide, residuos y varianzas)
+wool1 <- function(g, r, full = FALSE) {
+  N <- g$N; T <- g$T; v <- function(M) as.vector(M); tt <- factor(rep(1:T, each = N))
+  mx <- rep(rowMeans(g$x), T); mw <- rep(rowMeans(g$w), T); mz <- rep(rowMeans(g$z), T)
+  # ecuacion de interes
+  pi_ <- suppressWarnings(glm(v(r$sobs) ~ v(g$x) + mx, binomial("probit"))); zb <- predict(pi_, type = "link"); lam_y <- dnorm(zb) / pnorm(zb)
+  dy <- data.frame(y = v(r$y), x = v(g$x), mx = mx, tt = tt, lam = lam_y)
+  fy <- lm(y ~ x + mx + tt:lam, dy)
+  # ecuacion de seleccion
+  ps_ <- suppressWarnings(glm(v(r$sobs) ~ v(g$w) + v(g$z) + mw + mz, binomial("probit"))); zs <- predict(ps_, type = "link"); lam_s <- dnorm(zs) / pnorm(zs)
+  ds <- data.frame(s = v(r$s), w = v(g$w), z = v(g$z), mw = mw, mz = mz, tt = tt, lam = lam_s)
+  fs <- lm(s ~ w + z + mw + mz + tt:lam, ds)
+  est <- c(beta = unname(coef(fy)["x"]), gamma1 = unname(coef(fs)["w"]), gamma2 = unname(coef(fs)["z"]))
+  if (!full) return(est)
+  list(est = est, eps_hat = matrix(resid(fs), N, T), se = c(sqrt(diag(vcovHC(fy, "HC1")))["x"], sqrt(diag(vcovHC(fs, "HC1")))[c("w", "z")]))
+}
+```
+
+## Ejercicio 1 — Caso 1: Monte Carlo con $T=2$
+
+**Enunciado.** Para cada modelo y combinación de $N=20,40,100$ y $T=2$ realice un experimento de Monte Carlo de $S=1000$ simulaciones y reporte el sesgo medio, el sesgo mediano, el error estándar, el RMSE y la desviación media absoluta de la estimación de Wooldridge para los tres parámetros del modelo ($\beta,\gamma_1,\gamma_2$). Explique sus resultados.
+
+```{r p1-caso1, cache=TRUE}
+rep1 <- function(i, N, T) {                                           # una replica: 3 modelos x 3 parametros
+  g <- gen1(N, T); out <- numeric(0)
+  for (m in c("A", "B", "C")) out <- c(out, tryCatch(wool1(g, resp1(g, m)), error = function(e) rep(NA_real_, 3)))
+  out
+}
+nm9 <- paste(rep(c("A", "B", "C"), each = 3), rep(c("beta", "gamma1", "gamma2"), 3), sep = ".")
+resumen1 <- function(est) {                                           # sesgo medio/mediano, DE, RMSE, AMD (verdadero valor = 1)
+  t(apply(est - 1, 2, function(v) { v <- v[is.finite(v)]; c(`Sesgo medio` = mean(v), `Sesgo mediano` = median(v), `Desvío estándar` = sd(v),
+                                                           RMSE = sqrt(mean(v^2)), AMD = mean(abs(v))) }))
+}
+res1 <- lapply(c(20, 40, 100), function(N) { e <- pmc(REPS, function(i) rep1(i, N, 2)); colnames(e) <- nm9; e })
+names(res1) <- paste0("N", c(20, 40, 100))
+tab1 <- function(est) { r <- resumen1(est); out <- NULL
+  for (p in c("beta", "gamma1", "gamma2")) out <- rbind(out, t(r[paste(c("A", "B", "C"), p, sep = "."), ]))
+  rn <- paste(rep(rownames(t(r))[1:5], 3), rep(c("β", "γ1", "γ2"), each = 5)); rownames(out) <- rn; colnames(out) <- paste("Modelo", c("A", "B", "C")); out }
+kable(tab1(res1$N20), digits = 3, caption = "Replicación en R, Wooldridge-Mundlak, N = 20, T = 2, 1000 réplicas")
+kable(tab1(res1$N40), digits = 3, caption = "Replicación en R, N = 40")
+kable(tab1(res1$N100), digits = 3, caption = "Replicación en R, N = 100")
+```
+
+**Resultado (PDF R)** — sesgo medio de $\hat\beta$ / RMSE de $\hat\beta$ (modelos A / B / C):
+
+| $N$ | Sesgo medio $\hat\beta$ | RMSE $\hat\beta$ | Sesgo medio $\hat\gamma_1$ (A / B / C) |
+|---|---|---|---|
+| 20 | 0,742 / 1,613 / 1,432 | 3,266 / 3,724 / 5,858 | 0,124 / 0,038 / 0,098 |
+| 40 | 0,946 / 1,854 / 1,797 | 1,982 / 2,863 / 3,168 | 0,239 / 0,177 / 0,217 |
+| 100 | 0,999 / 2,079 / 2,035 | 1,392 / 2,341 / 2,448 | 0,332 / 0,221 / 0,274 |
+
+**Resolución (PDF R):** "... a medida que el tamaño de muestra aumenta, para cada modelo (A, B, C) y para los tres parámetros ..., mientras que el sesgo medio y el sesgo mediano aumentan, el desvío estándar, el RMSE y la AMD disminuyen. Por otro lado, ... la estimación del modelo A se ajusta mejor al valor poblacional del parámetro $\hat\beta$, mientras que la estimación del modelo B se ajusta mejor a los valores poblacionales de $\gamma_1$ y $\gamma_2$. Por último, ... cuando se está en presencia de un modelo como el C ... este método de estimación (Wooldridge bajo el enfoque de Mundlak) no se ajusta bien al valor poblacional del parámetro de la ecuación de interés."
+
+> **⚠️ DISCREPANCIA 2 (la resolución se contradice con sus tablas y el estimador no es consistente).** En el texto del PDF R se lee "a medida que el tamaño de muestra aumenta ... el sesgo medio y el sesgo mediano aumentan", pero **eso es exactamente lo que muestran sus tablas** (el sesgo de $\hat\beta$ en el modelo A sube de 0,742 a 0,946 y a 0,999; el de $\hat\gamma_1$ de 0,124 a 0,239 y a 0,332) y, en la replicación en R, el sesgo del modelo A tampoco desaparece (0,67; 0,93 y 0,92 para $N=20,40,100$). Es decir, el estimador **no es consistente**: el sesgo no desaparece con $N$ (sólo cae la varianza, así que el RMSE se acerca al sesgo). La causa está en la implementación del `.do` (DISCREPANCIA 3), no en el método de Wooldridge. El PDF R no explica por qué ocurre, que es lo que pedía el enunciado ("Explique sus resultados").
+
+> **⚠️ DISCREPANCIA 3 (código: la corrección se estima con toda la muestra, no con la muestra seleccionada).** El `.do` corre `regress y_model x mean_x i.t#c.lambda ...` y `regress s_model w z ... i.t#c.lambda ...` sobre **todas** las observaciones, incluidas las no seleccionadas, donde $y=0$ y $s=0$ por construcción ($y=y^*\cdot s_{obs}$). El estimador de Wooldridge (1995) (Heckman en paneles) usa en la segunda etapa **sólo la submuestra con $s_{it}=1$**, donde se observa $y^*$; incluir los ceros mezcla la variable censurada con la latente y sesga los coeficientes sin remedio. Abajo se verifica con $\beta$ que, restringiendo la segunda etapa a $s=1$, el sesgo cae sustancialmente.
+
+```{r p1-diagnostico, cache=TRUE}
+# Diagnostico DISCREPANCIA 3: beta con la segunda etapa restringida a la muestra seleccionada (s = 1)
+wool_sel <- function(g, r) {
+  N <- g$N; T <- g$T; v <- function(M) as.vector(M); mx <- rep(rowMeans(g$x), T); tt <- factor(rep(1:T, each = N))
+  pi_ <- suppressWarnings(glm(v(r$sobs) ~ v(g$x) + mx, binomial("probit"))); zb <- predict(pi_, type = "link"); lam <- dnorm(zb) / pnorm(zb)
+  d <- data.frame(y = v(r$y), x = v(g$x), mx = mx, tt = tt, lam = lam)[v(r$sobs) == 1, ]
+  unname(coef(lm(y ~ x + mx + tt:lam, d))["x"])
+}
+rep_diag <- function(i, N) { g <- gen1(N, 2); c(sapply(c("A", "B", "C"), function(m) { r <- resp1(g, m); c(todas = wool1(g, r)["beta"], seleccionada = wool_sel(g, r)) })) }
+dg <- pmc(REPS, function(i) rep_diag(i, 100)); dg <- apply(dg, 2, function(v) mean(v[is.finite(v)]))
+nd <- paste(rep(c("A", "B", "C"), each = 2), rep(c("(código del .do)", "(sólo s = 1)"), 3))
+kable(data.frame(Modelo = nd, `Sesgo medio de β̂ (N = 100, T = 2)` = round(dg - 1, 3), check.names = FALSE), caption = "Diagnóstico de la DISCREPANCIA 3")
+```
+
+> Restringir la segunda etapa a la muestra seleccionada **elimina prácticamente el sesgo** de $\hat\beta$ en los tres modelos (−0,11; 0,01 y −0,09 con $N=100$, frente a 0,92; 2,04 y 1,94 con el código del `.do`), lo que confirma que la causa del sesgo es la DISCREPANCIA 3.
+
+**Explicación de los resultados de la replicación.** (i) El sesgo de $\hat\beta$ (y de $\hat\gamma_1,\hat\gamma_2$) **no se reduce** al aumentar $N$ en los tres modelos y la varianza sí cae: el estimador del `.do` es inconsistente por la razón de la DISCREPANCIA 3. (ii) Los modelos B y C, donde $c_j$ y $\alpha_j$ dependen de las observables, muestran los sesgos más grandes con el código del `.do` (≈ 1,4–2,0 para $\hat\beta$); el modelo C, que combina ambas correlaciones, es además el de mayor dispersión. (iii) Con la corrección sobre la muestra seleccionada el método de Wooldridge-Mundlak recupera $\beta$ en los tres modelos.
+
+## Ejercicio 2 — Caso 2: bootstrap con $T=10$
+
+**Enunciado.** Para cada modelo y combinación de $N=20,40,100$ y $T=10$: (a) tome la primera generación de los datos ($S=1$) como si fuera una muestra obtenida de la realidad; (b) estime el modelo por Wooldridge y guarde los coeficientes estimados ($\beta^{(b)},\gamma_1^{(b)},\gamma_2^{(b)}$) y los residuos de la ecuación de selección, $\hat\epsilon^{(b)}_{jt}$; (c) realice un procedimiento de bootstrapping para construir intervalos de 95 % de confiabilidad: (i) muestreo aleatorio simple con reemplazo para obtener una nueva muestra de errores de la ecuación de selección (para cada $j$ una nueva muestra de residuos de dimensión $T$); con estos residuos, $\gamma_1^{(b)},\gamma_2^{(b)}$, los valores originales de $w,z$ y $\alpha_j$ construya una nueva variable dependiente de selección; (ii) con ella, $\beta^{(b)}$, $x_{jt}$ y $c_j$ construya una nueva variable dependiente de la ecuación de interés; (iii) estime por Wooldridge los tres parámetros; (iv) repita $B=1000$ veces. Compare con los intervalos de 95 % construidos a partir de la matriz de varianzas y covarianzas asintótica del modelo estimado con los datos de $S=1$. ¿Qué conclusiones puede sacar?
+
+> **⚠️ DISCREPANCIA 4 (residuos de "selección").** El enunciado habla de los residuos $\hat\epsilon_{jt}$ de la ecuación de selección, que se interpreta como el error latente de la ecuación $s^*$. El `.do` toma como $\hat\epsilon$ los **residuos de la regresión por MCO de la variable censurada $s=s^*\cdot s_{obs}$** (con las interacciones de $\hat\lambda$), estimada sobre toda la muestra; no son los errores de la ecuación latente (que no son observables) ni residuos del probit. Aquí se replica ese procedimiento, que es el del `.do`.
+
+```{r p1-caso2, cache=TRUE}
+q25975 <- function(v) { v <- sort(v[is.finite(v)]); c(v[round(0.025 * length(v))], v[round(0.975 * length(v))]) }   # pctile(nquantiles(1000)) [25], [975]
+caso2 <- function(N) {
+  set.seed(SEED); g <- gen1(N, 10)
+  rs  <- lapply(c(A = "A", B = "B", C = "C"), function(m) resp1(g, m))                    # S = 1 (la "muestra real")
+  est <- lapply(rs, function(r) wool1(g, r, full = TRUE))
+  one <- function(b) {                                                                      # una muestra bootstrap: mismos indices de remuestreo para los 3 modelos
+    idx <- t(sapply(1:N, function(j) sample.int(10, replace = TRUE))); out <- numeric(0)
+    for (m in c("A", "B", "C")) {
+      eb <- matrix(est[[m]]$eps_hat[cbind(rep(1:N, 10), as.vector(idx))], N, 10)           # residuos remuestreados dentro de cada j (estratos = id)
+      e  <- g$eff[[m]]; es <- est[[m]]$est
+      ystar <- es["beta"] * g$x + e$c + g$u; sstar <- es["gamma1"] * g$w + es["gamma2"] * g$z + e$alpha + eb
+      sobs <- (sstar > 0) * 1
+      out <- c(out, tryCatch(wool1(g, list(y = ystar * sobs, s = sstar * sobs, sobs = sobs)), error = function(e) rep(NA_real_, 3)))
+    }
+    out }
+  list(est = est, boot = pmc(REPS, function(i) one(i)))
+}
+c2 <- lapply(c(20, 40, 100), caso2); names(c2) <- paste0("N", c(20, 40, 100))
+ci_tab <- function(kind) {
+  out <- NULL
+  for (N in names(c2)) for (p in c(1, 2, 3)) { row <- NULL
+    for (m in c("A", "B", "C")) {
+      e <- c2[[N]]$est[[m]]; col <- (match(m, c("A", "B", "C")) - 1) * 3 + p
+      ci <- if (kind == "boot") q25975(c2[[N]]$boot[, col]) else { set.seed(SEED); q25975(e$est[p] + rnorm(REPS, 0, e$se[p])) }   # percentiles de est + N(0, V)
+      row <- c(row, sprintf("[%.3f; %.3f]", ci[1], ci[2])) }
+    out <- rbind(out, data.frame(`Tamaño muestra` = sub("N", "N = ", N), Parámetro = c("β", "γ1", "γ2")[p], `Modelo A` = row[1], `Modelo B` = row[2], `Modelo C` = row[3], check.names = FALSE)) }
+  out }
+kable(ci_tab("boot"), caption = "Replicación en R. Intervalos de 95 % por bootstrapping (B = 1000)")
+kable(ci_tab("asint"), caption = "Replicación en R. Intervalos de 95 % a partir de la matriz de varianzas y covarianzas asintótica (S = 1)")
+```
+
+**Resultado (PDF R):**
+
+| Tamaño | Parám. | Bootstrap A | Bootstrap B | Bootstrap C | Asintótico A | Asintótico B | Asintótico C |
+|---|---|---|---|---|---|---|---|
+| $N=20$ | $\beta$ | [1,654; 5,301] | [0,218; 2,058] | [0,816; 1,377] | [−1,381; 4,474] | [−1,145; 2,928] | [−1,965; 3,385] |
+| | $\gamma_1$ | [1,064; 2,705] | [0,877; 1,604] | [2,242; 3,762] | [0,411; 1,615] | [0,530; 1,544] | [0,803; 2,764] |
+| | $\gamma_2$ | [1,035; 2,396] | [0,941; 1,605] | [1,865; 2,956] | [0,373; 1,849] | [0,607; 1,617] | [0,826; 2,277] |
+| $N=40$ | $\beta$ | [6,032; 7,982] | [3,346; 5,001] | [2,522; 6,037] | [0,866; 4,322] | [0,052; 3,579] | [0,143; 4,056] |
+| $N=100$ | $\beta$ | [5,650; 6,336] | [5,335; 6,007] | [6,290; 7,070] | [1,561; 3,182] | [1,599; 2,962] | [1,563; 3,549] |
+
+(El PDF R incluye además los $\gamma_1,\gamma_2$ de $N=40,100$; se omiten por espacio.)
+
+> **⚠️ DISCREPANCIA 5 (no se responde la pregunta de conclusiones y los intervalos son incoherentes).** El PDF R sólo presenta las Tablas 4 y 5 y **no incluye ninguna conclusión**, que es lo que pide el enunciado. Además, los intervalos bootstrap de $\beta$ **no contienen ni el valor verdadero ($\beta=1$) ni la estimación puntual ni el intervalo asintótico**: p. ej. $N=100$, modelo A: bootstrap [5,650; 6,336] frente a asintótico [1,561; 3,182]; para $N=40$ el bootstrap de A es [6,032; 7,982] y el asintótico [0,866; 4,322]. Un bootstrap correcto debería estar centrado en torno de la estimación puntual de la muestra original; que esté lejos delata el sesgo del estimador (DISCREPANCIA 3) que el bootstrap **re-genera y amplifica** al construir $y^*$ con $\beta^{(b)}$ ya sesgado.
+
+**Conclusiones (a partir de la replicación en R).** (i) Los intervalos asintóticos son mucho más anchos para $N$ chico y se estrechan con $N$, pero como el estimador es inconsistente, que se estrechen no significa que cubran el valor verdadero. (ii) Los intervalos bootstrap se desplazan **lejos del verdadero valor** (y de la estimación puntual) porque el procedimiento repite el estimador sesgado sobre datos cuyos parámetros ya incorporan el sesgo. (iii) En consecuencia, no puede confiarse en ninguno de los dos para inferencia con la implementación del `.do`; la corrección debería hacerse primero (estimar la segunda etapa sólo con $s=1$).
+
+---
+
+# Segunda parte: Propiedades de muestra finita en paneles dinámicos
+
+**Enunciado.** Considere el modelo $y_{jt}=\alpha y_{jt-1}+\beta x_{jt}+c_j+u_{jt}$, $j=1,\dots,N$; $t=1,\dots,T+10$ (8), con $c_j\sim IN(0,1)$, $u_{jt}\sim IN(0,1)$, $y_{j0}=0$ y las primeras 10 observaciones descartadas (el tamaño muestral es $NT$). El regresor $x_{jt}=0{,}8x_{jt-1}+v_{jt}$, $v_{jt}\sim N(0,0{,}9)$, es estrictamente exógeno. Se pide, para cada caso: media, desvío estándar y RMSE de $\hat\alpha$ con **LSDV, AB-GMM1, AB-GMM2, BB-GMM1, AH y Kiviet**, y el tamaño del test de $H_0:\alpha=\alpha_0$ (al 1 %). (AH: Anderson-Hsiao con niveles rezagados como instrumento de la primera diferencia; Kiviet: LSDV corregido por el sesgo asintótico, usando AH como estimación inicial.)
+
+Casos: **1)** $\beta=0,T=10,N=30,\alpha=0{,}5$; **2)** igual con $N=50$; **3)** $\beta=0,T=20,N=30,\alpha=0{,}8$; **4)** $\beta=0,T=20,N=30,\alpha=0{,}92$; **5)** $\beta=0,T=30,N=50,\alpha=0{,}5$; **6)** $\beta=1,T=7,N=100,\alpha=0{,}8$ (comparar con AB, Tabla 1, p. 284; reportar también $\beta$); **7)** $\beta=0,T=4,N=100,\alpha=0{,}8$ (comparar con BB, Tabla 2(a), p. 131); **8)** comparar 3, 6 y 7.
+
+> **⚠️ DISCREPANCIA 6 (Kiviet no replicable en R).** En R no existe un paquete equivalente a `xtlsdvc` (no hay en CRAN una implementación del corrector de Kiviet/Bruno), por lo que la columna **Kiviet no se replica**; sólo se transcribe del PDF R. Además, el código del `.do` para el test de Kiviet tiene un **error**: define `generate within_x=yL1-mean_x` (resta la media de $x$ a $y_{L1}$, en vez de usar `x-mean_x`), con lo que el residuo `e`, la varianza `s2` y el error estándar usados en el test de Kiviet son incorrectos; los "tamaños del test Kiviet" del PDF R (0,0–77,1 %) están por lo tanto afectados. También usa el denominador $NT-N-T-K+1$ (resta $T$ sin dummies de tiempo; ver TP N° 3).
+
+## Estimadores
+
+LSDV y AH se programaron a mano; AB y BB con un estimador GMM vectorizado (panel balanceado) que replica a `xtabond2` (validado contra el motor general del TP N° 3, que reproduce las salidas de Stata): AB usa $L.y$ como instrumento tipo GMM e $\Delta x$ estándar en diferencias; BB agrega la ecuación en niveles con $\Delta L.y$ y $x$ en niveles, con la matriz de ponderación del primer paso de Blundell-Bond y errores robustos (Windmeijer en dos pasos).
+
+```{r p2-funciones}
+# --- simulacion del modelo (8): devuelve las muestras recortadas (t = 11..T+10) y los rezagos necesarios
+sim_dyn <- function(N, T, alpha, beta) {
+  Tt <- T + 10
+  cc <- rnorm(N); u <- matrix(rnorm(N * Tt), N, Tt); v <- matrix(rnorm(N * Tt, 0, sqrt(0.9)), N, Tt)
+  x <- matrix(0, N, Tt); y <- matrix(0, N, Tt)
+  for (t in 2:Tt) { x[, t] <- 0.8 * x[, t - 1] + v[, t]; y[, t] <- alpha * y[, t - 1] + beta * x[, t] + cc + u[, t] }
+  k <- 11:Tt
+  list(Y = y[, k], X = x[, k], YL1 = y[, k - 1], YL2 = y[, k - 2], XL1 = x[, k - 1])
+}
+# --- LSDV (within) con errores robustos HC1 como `regress y yL1 x i.id, robust`
+lsdv <- function(Y, YL1, X) {
+  N <- nrow(Y); T <- ncol(Y); n <- N * T; k <- N + 2
+  yy <- as.vector(Y - rowMeans(Y)); Z <- cbind(as.vector(YL1 - rowMeans(YL1)), as.vector(X - rowMeans(X)))
+  Q <- solve(crossprod(Z)); b <- Q %*% crossprod(Z, yy); e <- yy - Z %*% b
+  list(b = drop(b), V = n / (n - k) * Q %*% crossprod(Z * as.numeric(e)) %*% Q, df = n - k)
+}
+# --- Anderson-Hsiao: 2SLS en diferencias, instrumento y_{t-2}, sin constante, errores robustos (ivregress ..., robust)
+ah <- function(Y, YL1, YL2, X, XL1) {
+  yD <- as.vector(Y - YL1); Xr <- cbind(as.vector(YL1 - YL2), as.vector(X - XL1)); Zi <- cbind(as.vector(YL2), as.vector(X - XL1))
+  Q <- solve(crossprod(Zi, Xr)); b <- Q %*% crossprod(Zi, yD); e <- yD - Xr %*% b
+  list(b = drop(b), V = Q %*% crossprod(Zi * as.numeric(e)) %*% t(Q))
+}
+# --- GMM rapido (panel balanceado): AB (diferencias) y BB (sistema), 1 o 2 pasos, robusto / Windmeijer
+gmm_fast <- function(Y, YL1, X, system = FALSE, step = 1) {
+  N <- nrow(Y); T <- ncol(Y); Ln <- cbind(NA, Y[, -T, drop = FALSE]); rows <- list(); Kx <- if (system) 3 else 2
+  colsFD <- list(); for (t in 3:T) for (s in 2:(t - 1)) colsFD[[length(colsFD) + 1]] <- c(t = t, s = s)
+  nFD <- length(colsFD) + (if (!system) 1 else 0); colsLV <- if (system) 3:T else integer(0)
+  L <- nFD + (if (system) length(colsLV) + 2 else 0)
+  for (t in 2:T) {
+    Z <- matrix(0, N, L); for (a in seq_along(colsFD)) if (colsFD[[a]]["t"] == t) Z[, a] <- Ln[, colsFD[[a]]["s"]]
+    if (!system) Z[, nFD] <- X[, t] - X[, t - 1]
+    Xr <- cbind(YL1[, t] - YL1[, t - 1], X[, t] - X[, t - 1]); if (system) Xr <- cbind(Xr, 0)
+    rows[[length(rows) + 1]] <- list(y = Y[, t] - Y[, t - 1], X = Xr, Z = Z, type = "d", t = t) }
+  if (system) for (t in 1:T) {
+    Z <- matrix(0, N, L); a <- which(colsLV == t); if (length(a)) Z[, nFD + a] <- Ln[, t] - Ln[, t - 1]
+    Z[, nFD + length(colsLV) + 1] <- X[, t]; Z[, nFD + length(colsLV) + 2] <- 1
+    rows[[length(rows) + 1]] <- list(y = Y[, t], X = cbind(YL1[, t], X[, t], 1), Z = Z, type = "l", t = t) }
+  R <- length(rows); H <- diag(R)
+  for (r in 1:R) { if (rows[[r]]$type == "d") H[r, r] <- 2; if (r < R && rows[[r]]$type == "d" && rows[[r + 1]]$type == "d") H[r, r + 1] <- H[r + 1, r] <- -1 }
+  if (system) for (r in 1:R) for (s in 1:R) if (rows[[r]]$type == "d" && rows[[s]]$type == "l") {
+    cc <- if (rows[[s]]$t == rows[[r]]$t) 1 else if (rows[[s]]$t == rows[[r]]$t - 1) -1 else 0; H[r, s] <- H[s, r] <- cc }
+  ZHZ <- matrix(0, L, L); for (r in 1:R) for (s in 1:R) if (H[r, s] != 0) ZHZ <- ZHZ + H[r, s] * crossprod(rows[[r]]$Z, rows[[s]]$Z)
+  XZ <- Reduce(`+`, lapply(rows, function(e) crossprod(e$X, e$Z))); Zy <- Reduce(`+`, lapply(rows, function(e) crossprod(e$Z, e$y)))
+  gmat <- function(b) Reduce(`+`, lapply(rows, function(e) e$Z * as.numeric(e$y - e$X %*% b)))
+  W1 <- ginv(ZHZ); A1 <- solve(XZ %*% W1 %*% t(XZ)); b1 <- A1 %*% XZ %*% W1 %*% Zy
+  G1 <- gmat(b1); S <- crossprod(G1); V1r <- A1 %*% (XZ %*% W1 %*% S %*% W1 %*% t(XZ)) %*% A1
+  if (step == 1) return(list(b = drop(b1), V = V1r))
+  W2 <- ginv(S); A2 <- solve(XZ %*% W2 %*% t(XZ)); b2 <- A2 %*% XZ %*% W2 %*% Zy
+  g2 <- colSums(gmat(b2)); D <- matrix(0, Kx, Kx)
+  for (p in 1:Kx) { dG <- Reduce(`+`, lapply(rows, function(e) -e$Z * e$X[, p]))
+    dS <- crossprod(dG, G1) + crossprod(G1, dG); D[, p] <- as.numeric(-A2 %*% XZ %*% W2 %*% dS %*% W2 %*% g2) }
+  list(b = drop(b2), V = A2 + D %*% A2 + A2 %*% t(D) + D %*% V1r %*% t(D))
+}
+# --- una replica: estimaciones y p-valores (H0: parametro = valor verdadero)
+rep2 <- function(i, N, T, alpha, beta, con_beta) {
+  d <- sim_dyn(N, T, alpha, beta); safe <- function(e) tryCatch(e, error = function(err) NULL)
+  fits <- list(LSDV = safe(lsdv(d$Y, d$YL1, d$X)), AB1 = safe(gmm_fast(d$Y, d$YL1, d$X, FALSE, 1)), AB2 = safe(gmm_fast(d$Y, d$YL1, d$X, FALSE, 2)),
+               BB1 = safe(gmm_fast(d$Y, d$YL1, d$X, TRUE, 1)), AH = safe(ah(d$Y, d$YL1, d$YL2, d$X, d$XL1)))
+  pv <- function(nm, j, null) { f <- fits[[nm]]; if (is.null(f)) return(c(NA, NA)); b <- f$b[j]; t <- (b - null) / sqrt(f$V[j, j])
+    c(b, if (nm == "LSDV") 2 * pt(-abs(t), f$df) else pchisq(t^2, 1, lower.tail = FALSE)) }
+  out <- unlist(lapply(names(fits), function(nm) pv(nm, 1, alpha)))
+  if (con_beta) out <- c(out, unlist(lapply(names(fits), function(nm) pv(nm, 2, beta))))
+  out
+}
+```
+
+```{r p2-sims, cache=TRUE}
+casos <- data.frame(caso = 1:7, alpha = c(.5, .5, .8, .92, .5, .8, .8), beta = c(0, 0, 0, 0, 0, 1, 0), N = c(30, 50, 30, 30, 50, 100, 100), T = c(10, 10, 20, 20, 30, 7, 4))
+est_nm <- c("LSDV", "AB-GMM1", "AB-GMM2", "BB-GMM1", "AH")
+run_caso <- function(k) {
+  cs <- casos[k, ]; con_beta <- cs$beta != 0
+  m <- pmc(REPS, function(i) rep2(i, cs$N, cs$T, cs$alpha, cs$beta, con_beta), seed = SEED + k)
+  summ <- function(M, truth) { est <- M[, seq(1, 2 * 5, 2)]; p <- M[, seq(2, 2 * 5, 2)]
+    sapply(1:5, function(j) { e <- est[, j]; pj <- p[, j]; ok <- is.finite(e)
+      c(Media = mean(e[ok]), `Desvío estándar` = sd(e[ok]), RMSE = sqrt(mean((e[ok] - truth)^2)), `Tamaño del test (%)` = 100 * mean(pj[is.finite(pj)] < 0.01)) }) }
+  out <- list(alpha = summ(m[, 1:10], cs$alpha)); colnames(out$alpha) <- est_nm
+  if (con_beta) { out$beta <- summ(m[, 11:20], cs$beta); colnames(out$beta) <- est_nm }
+  out }
+t0 <- Sys.time(); sims2 <- lapply(1:7, run_caso); cat("tiempo simulaciones Parte 2:", round(as.numeric(Sys.time() - t0, units = "mins"), 1), "min\n")
+```
+
+## Resultados de la replicación y comparación con el PDF R (Ejercicios 1 a 8)
+
+```{r p2-pdf}
+pdf6 <- list(
+  `6` = rbind(Media = c(.333, .400, .397, .687, .504, .492), `Desvío estándar` = c(.056, .100, .104, .091, .135, .078), RMSE = c(.177, .142, .146, .208, .135, .079), `Tamaño del test (%)` = c(62.8, 6.7, 4.0, 54.3, 0, 2.5)),
+  `7` = rbind(c(.337, .433, .430, .641, .503, .494), c(.043, .083, .091, .077, .102, .061), c(.169, .107, .114, .161, .102, .061), c(87.3, 3.7, 3.1, 41.4, 0, 2.8)),
+  `8` = rbind(c(.691, .666, .630, .961, .873, .779), c(.034, .060, .088, .016, 1.569, .044), c(.114, .146, .191, .162, 1.570, .049), c(84.4, 41.8, 9.5, 100, 0, 7.7)),
+  `9` = rbind(c(.844, .841, .842, 1.011, .920, .905), c(.024, .045, .053, .005, .087, .030), c(.080, .091, .094, .091, .087, .033), c(87.7, 29.9, 10.0, 100, 0, 6.5)),
+  `10` = rbind(c(.446, .460, .423, .764, .502, .499), c(.024, .029, .059, .040, .049, .026), c(.059, .049, .097, .267, .049, .026), c(38.6, 11.1, 1.1, 100, 0, 0.5)),
+  `11a` = rbind(c(.728, .768, .766, .853, .995, .810), c(.019, .073, .079, .042, 7.162, .054), c(.075, .079, .085, .068, 7.161, .055), c(92.7, .7, .8, 22.0, 0, 0)),
+  `11b` = rbind(c(1.020, .995, .982, .880, 1.066, 1.011), c(.040, .059, .062, .093, 2.327, .055), c(.045, .059, .065, .152, 2.327, .056), c(2.2, 1.5, 1.2, 17.0, 0, 2.2)),
+  `12` = rbind(c(.287, .205, .185, .895, .974, .403), c(.057, 1.025, 1.044, .092, 27.976, .200), c(.516, 1.185, 1.211, .132, 27.963, .444), c(100, 8.5, 12.1, 30.0, 0, 77.1)))
+for (k in names(pdf6)) rownames(pdf6[[k]]) <- c("Media", "Desvío estándar", "RMSE", "Tamaño del test (%)")
+colnames(pdf6[[1]]) <- c(est_nm, "Kiviet")
+for (k in names(pdf6)) colnames(pdf6[[k]]) <- c(est_nm, "Kiviet")
+mostrar <- function(k, titulo, pdfk, par = "alpha") {
+  r <- sims2[[k]][[par]]; r <- cbind(r, Kiviet = NA)
+  cat("\n**", titulo, "** — replicación en R (arriba) y PDF R (abajo)\n\n", sep = "")
+  print(kable(round(r, 3), caption = "Replicación en R (Kiviet: no replicable)"))
+  print(kable(pdf6[[pdfk]], caption = "PDF R (Stata)"))
+}
+```
+
+```{r p2-ej1, results='asis'}
+mostrar(1, "Ejercicio 1 — β = 0, T = 10, N = 30, α = 0,5", "6")
+```
+
+**Resolución (PDF R):** "... mientras que, en las estimaciones LSDV, AB-GMM1, AB-GMM2 y Kiviet, la media de $\hat\alpha$ es menor al valor poblacional ($\alpha=0{,}5$), en las estimaciones BB-GMM1 y AH, es mayor. Por otro lado, ... en la estimación BB-GMM1, el RMSE empeora. Por último, en las estimaciones LSDV y BB-GMM1, el tamaño del test empeora (se aleja mucho del 1 %)."
+
+> **⚠️ DISCREPANCIA 7 (la resolución no responde "qué estimador debiera utilizarse en la práctica").** El enunciado pide, en el Ejercicio 1, "su conclusión de qué estimador debiera utilizarse en la práctica"; el PDF R sólo compara medias, RMSE y tamaños, sin recomendar un estimador. A la luz de los resultados: con $T=10,N=30$ el LSDV tiene sesgo negativo importante y tamaño 60 %; BB-GMM1 sesgo positivo y tamaño > 50 %; **AB-GMM1/GMM2 y Kiviet son los mejores** (sesgo pequeño y tamaño razonable), con AB-GMM2 de tamaño más cercano al nominal; AH es insesgado pero ineficiente (desvío alto).
+
+```{r p2-ej2, results='asis'}
+mostrar(2, "Ejercicio 2 — β = 0, T = 10, N = 50, α = 0,5", "7")
+```
+
+**Resolución (PDF R):** "Comparando con el ejercicio anterior (un $N$ mayor ...), ... para todas las estimaciones, la media de $\hat\alpha$ se acerca más al valor poblacional, el desvío estándar es menor y el RMSE mejora. Por otro lado, ... para las estimaciones LSDV y Kiviet, el tamaño del test empeora, para el resto, mejora."
+
+```{r p2-ej3, results='asis'}
+mostrar(3, "Ejercicio 3 — β = 0, T = 20, N = 30, α = 0,8", "8")
+```
+
+**Resolución (PDF R):** con $T$ y $\alpha$ mayores, LSDV mejora en media, desvío y RMSE pero el tamaño empeora; para el resto el RMSE empeora y el tamaño se aleja del 1 %; BB-GMM1 tiene tamaño 100 %.
+
+```{r p2-ej4, results='asis'}
+mostrar(4, "Ejercicio 4 — β = 0, T = 20, N = 30, α = 0,92 (instrumentos débiles)", "9")
+```
+
+**Resolución (PDF R):** "... para todas las estimaciones, la media de $\hat\alpha$ se acerca más al parámetro poblacional (α = 0,92), el desvío estándar es menor, el RMSE mejora y el tamaño del test empeora; en particular, para BB-GMM1, el tamaño del test es igual a 100 %."
+
+> **⚠️ DISCREPANCIA 8 (el PDF R no comenta el punto pedido en el Ejercicio 4).** El enunciado pide "prestar particular atención al comentario de BB acerca de los instrumentos débiles. ¿Qué puede comentar al respecto?". El PDF R no menciona los instrumentos débiles. Los resultados lo muestran: con $\alpha=0{,}92$ (cercano a una raíz unitaria) los niveles rezagados son instrumentos débiles de las primeras diferencias, y el AB-GMM1 queda fuertemente sesgado hacia abajo (similar a LSDV), con tamaño grande; el estimador de sistema BB reduce ese sesgo pero, con esta dinámica y la condición inicial usada ($y_{j0}=0$ con burn-in de 10 períodos), no satisface bien la restricción de estacionariedad inicial y su tamaño es 100 %.
+
+```{r p2-ej5, results='asis'}
+mostrar(5, "Ejercicio 5 — β = 0, T = 30, N = 50, α = 0,5", "10")
+```
+
+**Resolución (PDF R):** "... a pesar de las mejoras en la estimación LSDV, T = 30 no es suficiente como para ignorar el sesgo de LSDV."
+
+```{r p2-ej6, results='asis'}
+mostrar(6, "Ejercicio 6 — β = 1, T = 7, N = 100, α = 0,8: estimación de α", "11a")
+mostrar(6, "Ejercicio 6 — β = 1, T = 7, N = 100, α = 0,8: estimación de β", "11b", "beta")
+```
+
+**Tabla 1 de Arellano y Bond (1991, p. 284)** ($\alpha=0{,}8$, $\beta=1$, $N=100$, $T=7$, 100 réplicas; media / desvío estándar):
+
+| | GMM1 | GMM2 | OLS | Within | AHd | AHl |
+|---|---|---|---|---|---|---|
+| $\alpha$ | 0,7827 / 0,0582 | 0,7810 / 0,0609 | 0,8997 / 0,0090 | 0,7160 / 0,0206 | 0,8103 / 0,1313 | 0,8038 / 0,2677 |
+| $\beta$ | 1,0001 / 0,0622 | 0,9926 / 0,0671 | 0,7754 / 0,0423 | 1,0137 / 0,0461 | 1,0000 / 0,0789 | 0,9980 / 0,0893 |
+
+**Resolución (PDF R):** "Con esta configuración ..., es posible comparar con los resultados obtenidos por BB, Tabla 2(a), página 131. Se puede observar que, tanto para $\hat\alpha$ como para $\hat\beta$, las medias y los desvíos estándar son semejantes, debiéndose las pequeñas diferencias, probablemente, a la cantidad de replicaciones (AB usan 100 y acá, se usan 1000) y a la semilla utilizada."
+
+> **⚠️ DISCREPANCIA 9 (referencia equivocada y comparación demasiado benévola).** (i) El Ejercicio 6 pide comparar con **AB (1991), Tabla 1, p. 284**, pero el PDF R dice "BB, Tabla 2(a), página 131" (que corresponde al Ejercicio 7). (ii) La afirmación de que las medias y desvíos son "semejantes" **no vale para AH**: en el PDF R el AH (niveles) da media 0,995 con desvío **7,162** para $\alpha$ (y 2,327 para $\beta$), mientras que AB reportan para AHl 0,8038 con desvío 0,2677 (y 0,0893 para $\beta$); es decir, un desvío 27 veces mayor (se debe a unas pocas réplicas con valores extremos por instrumento débil, que 100 réplicas no necesariamente capturan). Para LSDV (similar al "Within") y los GMM la comparación sí es razonable (GMM1: 0,768/0,073 vs. 0,783/0,058; Within: 0,728/0,019 vs. 0,716/0,021). La replicación en R permite chequear esto con otra semilla.
+
+```{r p2-ej7, results='asis'}
+mostrar(7, "Ejercicio 7 — β = 0, T = 4, N = 100, α = 0,8", "12")
+```
+
+**Tabla 2(a) de Blundell y Bond (1998, p. 131)** ($N=100$, $\alpha=0{,}8$, $T=4$; media / RMSE / desvío): GMM2 (DIF): 0,4844 / 0,8805 / 0,8224; GMM2 (SYS): 0,8101 / 0,1620 / 0,1618.
+
+**Resolución (PDF R):** "... Se puede observar que la media y el desvío estándar son semejantes, debiéndose las pequeñas diferencias, probablemente, a la cantidad de replicaciones y a la semilla utilizada."
+
+> **⚠️ DISCREPANCIA 10.** Tampoco aquí las magnitudes son "semejantes": BB (Tabla 2a) reporta para GMM2-DIF media 0,484 y desvío 0,822, mientras el PDF R obtiene para AB-GMM1/GMM2 medias 0,205 / 0,185 y desvíos 1,025 / 1,044; y para el estimador de sistema BB reporta 0,810 (desvío 0,162) frente a 0,895 (desvío 0,092) del PDF R. Las diferencias son demasiado grandes para atribuirlas sólo a la semilla: el diseño del examen difiere del de BB (incluye un regresor $x$ además de $y_{t-1}$, el proceso comienza en $y_{j0}=0$ con 10 períodos de *burn-in* —no está en el estado estacionario— y $T$ efectivo cambia el conjunto de instrumentos), lo que debió advertirse.
+
+**Ejercicio 8 — comparación de los casos 3, 6 y 7.**
+
+**Resolución (PDF R):** LSDV es preferible con las dimensiones del Ej. 3 ($N=30,T=20$); AB-GMM1, AB-GMM2 y BB-GMM1 con las del Ej. 6 ($N=100,T=7$); AH y Kiviet con las del Ej. 3.
+
+> La replicación respalda en general esas conclusiones: los estimadores GMM mejoran con $N$ grande y $T$ chico (casos 6 y 7: pocos instrumentos y muchas unidades), mientras que LSDV y Kiviet —que corrigen/ignoran el sesgo de Nickell, de orden $1/T$— mejoran con $T$ grande (caso 3). El caso 7 ($T=4$) es el más desfavorable para AB-GMM (instrumentos débiles y pocas condiciones de momento), mientras que BB es claramente mejor allí.
+
+---
+
+# Tercera parte: Elasticidad precio de la demanda de cigarrillos
+
+**Enunciado.** Los datos *cigs.dta* tienen: `sales` (ventas de cigarrillos en paquetes per cápita), `pimin` (precio mínimo en estados cercanos), `ndi` (ingreso disponible per cápita), `cpi` (índice de precios al consumidor, 1983 = 100), `pop16` (población mayor de 16 años), `pop`, `price`, `year`, `state`. La elasticidad precio de demanda es $E_d=\frac{\Delta S_t/S_t}{\Delta p_t/p_t}$; en un modelo log-log: $\log(S_{i,t})=\gamma+\beta\log(p_{i,t})+\alpha_1ndi_{i,t}+\alpha_2cpi_{i,t}+\alpha_3pop16_{i,t}+\epsilon_{i,t}$ (9).
+
+```{r p3-datos}
+cg <- as.data.frame(read_dta("Datos/cigs.dta")); cg <- cg[order(cg$state, cg$year), ]
+cg$ln_sales <- log(cg$sales); cg$ln_price <- log(cg$price)
+f9 <- ln_sales ~ ln_price + ndi + cpi + pop16
+c(estados = length(unique(cg$state)), anios = length(unique(cg$year)), obs = nrow(cg))
+```
+
+## Ejercicio 1 — POLS
+
+**Enunciado.** Reporte la estimación de la elasticidad precio de demanda por POLS. ¿Qué puede estar potencialmente mal en esta estimación?
+
+**Resultado (PDF R) — Tabla 13:** N = 1380; $R^2$ = 0,2196; `ln_price` −0,8385905 (0,0522926, robusto); `ndi` 0,0000319 (4,77e-06); `cpi` 0,0075624 (0,0007855); `pop16` −2,53e-06 (1,43e-06); constante 7,410038 (0,1602936). **Resolución:** "la estimación de la elasticidad precio de la demanda es −0,839 ... Lo que puede estar potencialmente mal ... es que no se considera la posible presencia de heterogeneidad individual no observable ... ni tampoco la posibilidad de que sea un modelo dinámico ..., con lo cual, de ser relevantes, el estimador POLS será sesgado e inconsistente."
+
+**Replicación en R:**
+
+```{r p3-ej1}
+po <- lm(f9, cg); Vpo <- vcovHC(po, type = "HC1")
+round(cbind(coef = coef(po), ee_robusto = sqrt(diag(Vpo))), 7)
+c(N = nobs(po), R2 = round(summary(po)$r.squared, 4),
+  dif_coef = dif(coef(po), c(7.410038, -.8385905, .0000319, .0075624, -2.53e-06)),
+  dif_ee = dif(sqrt(diag(Vpo)), c(.1602936, .0522926, 4.77e-06, .0007855, 1.43e-06)))
+```
+
+## Ejercicio 2 — Efectos fijos vs. aleatorios: test de Hausman
+
+**Enunciado.** ... realice un contraste de hipótesis para determinar qué modelización usar. Interprete el resultado del contraste a niveles de significación usuales.
+
+**Resultado (PDF R) — Tabla 14:** Hausman con la opción `sigmamore`: $\chi^2(3)=36{,}66$, $p=0{,}0000$ (coeficientes FE vs. RE: `ln_price` −0,3984733 / −0,4111023; `ndi` −0,0000481 / −0,0000454; `cpi` 0,0105834 / 0,0104635; `pop16` 7,77e-06 / 6,33e-06). **Resolución:** "... al nivel de significatividad del 1 %, se encuentra que el mejor estimador es el de efectos fijos, ya que se rechaza la hipótesis nula de no correlación entre los regresores y los efectos fijos, por lo que el estimador de efectos aleatorios no es consistente." En la Tabla 15 se presenta FE (robusto): `ln_price` −0,3984733 (0,0598727); `ndi` −0,0000481 (0,0000101); `cpi` 0,0105834 (0,0013546); `pop16` 7,77e-06 (0,0000178); constante 5,967983 (0,1848623); $R^2$ within = 0,4163; sigma_u = 0,20556957; sigma_e = 0,09935482; rho = 0,81064.
+
+> **⚠️ DISCREPANCIA 11 (el PDF R sólo muestra una variante del test y no explica por qué).** El `.do` primero corre `hausman est_fe est_re` (clásico), comprueba que la matriz $\hat V_{FE}-\hat V_{RE}$ **no es definida positiva** (autovalores negativos, incluso excluyendo `cpi`) y recién entonces usa las variantes `sigmamore` y `sigmaless`; el PDF R muestra **sólo** `sigmamore` y no menciona el problema de la matriz ni que el test clásico no es válido. Además la matriz tiene rango 3 (no 4: `cpi` sólo varía en el tiempo), de allí los 3 g.l. Abajo se replican el test clásico y las dos variantes.
+
+**Replicación en R:**
+
+```{r p3-ej2}
+fe <- plm(f9, cg, index = c("state", "year"), model = "within"); re <- plm(f9, cg, index = c("state", "year"), model = "random")
+b <- coef(fe); d <- b - coef(re)[names(b)]; Vfe <- vcov(fe); Vre <- vcov(re)[names(b), names(b)]
+s2_fe <- sum(resid(fe)^2) / (nobs(fe) - 46 - 4); s2_re <- sum(resid(re)^2) / (nobs(re) - 5)   # sigma^2 de FE y de la regresion GLS de RE
+Dm <- diag(1 / sqrt(diag(Vfe)))                                                               # reescala (los regresores tienen magnitudes muy distintas)
+hausman_g <- function(Vd, tol = 1e-8) { Vs <- Dm %*% Vd %*% Dm; ds <- Dm %*% d; e <- eigen(Vs, symmetric = TRUE)
+  r <- sum(e$values > tol * max(abs(e$values))); Vi <- e$vectors[, 1:r, drop = FALSE] %*% diag(1 / e$values[1:r], r) %*% t(e$vectors[, 1:r, drop = FALSE])
+  H <- as.numeric(t(ds) %*% Vi %*% ds); c(autovalor_minimo = min(e$values), rango = r, chi2 = H, p_valor = pchisq(H, r, lower.tail = FALSE)) }
+tab_h <- rbind(`Clásico (V_FE - V_RE)` = hausman_g(Vfe - Vre, tol = -Inf),
+               `sigmamore` = hausman_g(Vfe * (s2_re / s2_fe) - Vre), `sigmaless` = hausman_g(Vfe - Vre * (s2_fe / s2_re)))
+kable(tab_h, digits = 4, caption = "Test de Hausman: FE vs. RE")
+round(cbind(FE = coef(fe), RE = coef(re)[names(b)]), 7)
+c(dif_coef_FE = dif(coef(fe), c(-.3984733, -.0000481, .0105834, 7.77e-06)), chi2_sigmamore_PDF = 36.66, chi2_sigmamore_R = round(tab_h["sigmamore", "chi2"], 2))
+```
+
+> El clásico da una matriz **no definida positiva** (autovalor mínimo negativo) y un estadístico negativo/no válido; `sigmamore` reproduce exactamente el $\chi^2(3)=36{,}66$ del PDF R y `sigmaless` da un valor parecido (37,6): **se rechaza $H_0$** (el efecto individual está correlacionado con los regresores) y se prefiere **FE**.
+
+```{r p3-fe-robusto}
+G <- length(unique(cg$state))
+V_fe_cl <- vcovHC(fe, method = "arellano", type = "HC1", cluster = "group") * G / (G - 1)
+round(cbind(coef = coef(fe), ee_cluster = sqrt(diag(V_fe_cl))), 7)
+c(constante = round(unname(within_intercept(fe)), 6), R2_within = round(summary(fe)$r.squared[1], 4),
+  dif_ee = dif(sqrt(diag(V_fe_cl)), c(.0598727, .0000101, .0013546, .0000178)))
+```
+
+> Con FE la elasticidad cae en valor absoluto de −0,839 a −0,398: la omisión de los efectos de estado genera un sesgo negativo en el POLS, como dice el PDF R.
+
+## Ejercicio 3 — Anderson-Hsiao
+
+**Enunciado.** Estime $\log(S_{i,t})=\gamma_i+\tau\log(S_{i,t-1})+\beta\log(p_{i,t})+\alpha_1ndi_{i,t}+\alpha_2cpi_{i,t}+\alpha_3pop16_{i,t}+\epsilon_{i,t}$ en primeras diferencias por 2SLS con el procedimiento de Anderson-Hsiao. Reporte sus resultados y cualquier diferencia con sus estimaciones anteriores.
+
+**Resultado (PDF R) — Tabla 16:** N = 1288; `LD.ln_sales` 4,956136 (3,604764); `D.ln_price` −0,176714 (0,1431834); `D.ndi` 0,0000923 (0,000067); `D.cpi` −0,0009513 (0,0026053); `D.pop16` 7,10e-06 (0,0000204); instrumento: `L2.ln_sales`. **Resolución:** "se puede observar que ninguna variable es estadísticamente significativa a los niveles usuales de significatividad."
+
+**Replicación en R:**
+
+```{r p3-ej3}
+SS <- matrix(cg$ln_sales, 46, 30, byrow = TRUE)
+mk <- function(v) matrix(cg[[v]], 46, 30, byrow = TRUE)
+lagm <- function(M, j = 1) if (j == 0) M else cbind(matrix(NA, nrow(M), j), M[, seq_len(ncol(M) - j), drop = FALSE])
+dm   <- function(M) M - lagm(M, 1)
+yD <- as.vector(dm(SS)); XD <- cbind(LD.ln_sales = as.vector(dm(lagm(SS, 1))), D.ln_price = as.vector(dm(mk("ln_price"))), D.ndi = as.vector(dm(mk("ndi"))),
+                                     D.cpi = as.vector(dm(mk("cpi"))), D.pop16 = as.vector(dm(mk("pop16"))))
+Zi <- cbind(L2.ln_sales = as.vector(lagm(SS, 2)), XD[, -1])
+ok <- complete.cases(yD, XD, Zi)
+Q <- solve(crossprod(Zi[ok, ], XD[ok, ])); bah <- Q %*% crossprod(Zi[ok, ], yD[ok]); eah <- yD[ok] - XD[ok, ] %*% bah
+Vah <- Q %*% crossprod(Zi[ok, ] * as.numeric(eah)) %*% t(Q)             # robusto (ivregress ..., robust)
+round(cbind(coef = drop(bah), ee = sqrt(diag(Vah)), z = drop(bah) / sqrt(diag(Vah))), 7)
+c(N = sum(ok), dif_coef = dif(bah, c(4.956136, -.176714, .0000923, -.0009513, 7.10e-06)), dif_ee = dif(sqrt(diag(Vah)), c(3.604764, .1431834, .000067, .0026053, .0000204)))
+```
+
+> **⚠️ DISCREPANCIA 12 (menor).** El PDF R no comenta que $\hat\tau=4{,}96$ es **mayor que 1** (raíz explosiva) y está fuera del intervalo [FE, POLS] en que debería caer un estimador consistente (aquí la correlación entre $\log S_{t-1}$ y los efectos suele estar entre el POLS y el FE); con un error estándar de 3,6 el instrumento ($\log S_{t-2}$) parece débil. Tampoco señala que, a diferencia del POLS y FE, la elasticidad precio pasa a ser no significativa (−0,177, EE 0,143).
+
+## Ejercicio 4 — Arellano-Bond
+
+**Enunciado.** Re-estime el modelo usando el estimador de Arellano-Bond. ¿Encuentra alguna diferencia con sus estimaciones anteriores? Interprete sus resultados.
+
+**Resultado (PDF R) — Tablas 17 y 18** (`xtabond2 ... gmmstyle(L.ln_sales, collapse) ivstyle(vars) robust noleveleq`, 32 instrumentos, N = 1288):
+
+| | Un paso | Dos pasos |
+|---|---|---|
+| `L.ln_sales` | 0,9975072 (0,0460666) | 0,946648 (0,0786545) |
+| `ln_price` | −0,0935868 (0,0323942) | −0,112763 (0,0423575) |
+| `ndi` | 0,000016 (3,63e-06) | 0,0000137 (5,07e-06) |
+| `cpi` | −0,0016501 (0,000338) | −0,0014292 (0,0004688) |
+| `pop16` | 0,0000646 (0,000038) | 0,000102 (0,0000635) |
+| AR(1) / AR(2) | −5,04 / 2,09 (p = 0,037) | −4,74 / 2,21 (p = 0,027) |
+| Sargan (27) / Hansen (27) | 255,58 (p = 0,000) / 40,47 (p = 0,046) | igual |
+
+**Resolución (PDF R):** "... la estimación de la elasticidad precio de la demanda es −0,094 (−0,113) ... sustancialmente menor (en valor absoluto) que en las estimaciones anteriores (POLS y FE), indicando que la omisión de $\log(S_{i,t-1})$ como variable explicativa genera un sesgo negativo en este coeficiente. Por último, esta nueva variable explicativa, $\log(S_{i,t-1})$, es estadísticamente significativa al 1 %."
+
+**Replicación en R** (con el motor GMM general del TP N° 3, que reproduce `xtabond2`):
+
+```{r p3-motor}
+# ---- motor GMM tipo xtabond2 (ver TP N° 3 para su validacion contra las salidas de Stata)
+gmm_est <- function(y, regs, gmm = list(), lags = c(1, 99), collapse = FALSE, ivfd = list(), ivlev = list(),
+                    system = FALSE, step = 1, robust = FALSE) {
+  K <- length(regs); rows <- vector("list", N)
+  for (i in 1:N) {
+    Xd <- matrix(sapply(regs, function(M) dm(M)[i, 2:Tt]), ncol = K); yd <- dm(y)[i, 2:Tt]
+    ok <- !is.na(yd) & rowSums(is.na(Xd)) == 0; zc <- list()
+    for (m in seq_along(gmm)) { M <- gmm[[m]]
+      if (!collapse) { for (t in 2:Tt) for (j in lags[1]:min(lags[2], t - 1)) { col <- rep(0, Tt - 1); v <- M[i, t - j]; col[t - 1] <- ifelse(is.na(v), 0, v); zc[[length(zc) + 1]] <- col }
+      } else { for (j in lags[1]:min(lags[2], Tt - 1)) { col <- rep(0, Tt - 1)
+          for (t in 2:Tt) if (t - j >= 1) { v <- M[i, t - j]; col[t - 1] <- ifelse(is.na(v), 0, v) }
+          zc[[length(zc) + 1]] <- col } } }
+    for (m in seq_along(ivfd)) { col <- dm(ivfd[[m]])[i, 2:Tt]; col[is.na(col)] <- 0; zc[[length(zc) + 1]] <- col }
+    Zd <- matrix(unlist(zc), nrow = Tt - 1)
+    rows[[i]] <- list(X = Xd[ok, , drop = FALSE], y = yd[ok], Z = Zd[ok, , drop = FALSE], t = (2:Tt)[ok], type = rep("d", sum(ok)))
+  }
+  nm <- names(regs)
+  Xall <- do.call(rbind, lapply(rows, `[[`, "X")); Zall <- do.call(rbind, lapply(rows, `[[`, "Z"))
+  keepX <- which(colSums(abs(Xall)) > 0); qx <- qr(Xall[, keepX, drop = FALSE]); keepX <- keepX[sort(qx$pivot[seq_len(qx$rank)])]
+  keepZ <- which(colSums(abs(Zall)) > 0); qz <- qr(Zall[, keepZ, drop = FALSE]); keepZ <- keepZ[sort(qz$pivot[seq_len(qz$rank)])]
+  for (i in 1:N) { rows[[i]]$X <- rows[[i]]$X[, keepX, drop = FALSE]; rows[[i]]$Z <- rows[[i]]$Z[, keepZ, drop = FALSE] }
+  nmk <- nm[keepX]; L <- length(keepZ); Kx <- length(keepX)
+  Hm <- function(eq) { r <- length(eq$y); H <- diag(r)
+    for (a in seq_len(r)) { if (eq$type[a] == "d") H[a, a] <- 2
+      if (a < r && eq$type[a + 1] == "d" && eq$t[a + 1] == eq$t[a] + 1) H[a, a + 1] <- H[a + 1, a] <- -1 }
+    H }
+  Hl <- lapply(rows, Hm); ZHZ <- Reduce(`+`, lapply(seq_len(N), function(i) t(rows[[i]]$Z) %*% Hl[[i]] %*% rows[[i]]$Z))
+  XZ <- Reduce(`+`, lapply(rows, function(e) t(e$X) %*% e$Z)); Zy <- Reduce(`+`, lapply(rows, function(e) t(e$Z) %*% e$y))
+  s2fun <- function(rs) { s <- 0; nd <- 0; for (i in 1:N) { s <- s + sum(rs[[i]]^2); nd <- nd + length(rs[[i]]) }; s / (2 * nd) }
+  W1 <- ginv(ZHZ); b1 <- solve(XZ %*% W1 %*% t(XZ), XZ %*% W1 %*% Zy)
+  res <- lapply(rows, function(e) as.numeric(e$y - e$X %*% b1)); nobs <- sum(sapply(rows, function(e) length(e$y)))
+  S <- Reduce(`+`, lapply(1:N, function(i) { g <- t(rows[[i]]$Z) %*% res[[i]]; g %*% t(g) }))
+  A1 <- solve(XZ %*% W1 %*% t(XZ)); V1r <- A1 %*% (XZ %*% W1 %*% S %*% W1 %*% t(XZ)) %*% A1
+  W2 <- ginv(S); b2 <- solve(XZ %*% W2 %*% t(XZ), XZ %*% W2 %*% Zy)
+  e2 <- lapply(rows, function(r) as.numeric(r$y - r$X %*% b2)); A2 <- solve(XZ %*% W2 %*% t(XZ))
+  g2 <- Reduce(`+`, lapply(1:N, function(i) t(rows[[i]]$Z) %*% e2[[i]]))
+  if (step == 1) { b <- b1; e <- res; Wt <- W1; V <- if (robust) V1r else s2fun(res) * A1
+  } else { b <- b2; e <- e2; Wt <- W2; V <- A2
+    if (robust) { D <- matrix(0, Kx, Kx)
+      for (p in 1:Kx) { dS <- Reduce(`+`, lapply(1:N, function(i) { zi <- t(rows[[i]]$Z); gi <- zi %*% res[[i]]; dgi <- -zi %*% rows[[i]]$X[, p]; dgi %*% t(gi) + gi %*% t(dgi) }))
+        D[, p] <- as.numeric(-A2 %*% XZ %*% W2 %*% dS %*% W2 %*% g2) }
+      V <- A2 + D %*% A2 + A2 %*% t(D) + D %*% V1r %*% t(D) } }
+  gS <- Reduce(`+`, lapply(1:N, function(i) t(rows[[i]]$Z) %*% res[[i]]))
+  list(coef = setNames(as.numeric(b), nmk), se = setNames(sqrt(diag(V)), nmk), n = nobs, ninst = L, df = L - Kx,
+       sargan = as.numeric(t(gS) %*% W1 %*% gS) / s2fun(res), hansen = as.numeric(t(g2) %*% W2 %*% g2),
+       rows = rows, e = e, XZ = XZ, Wt = Wt, Vb = V, Hl = Hl, s2 = s2fun(res), classic = (step == 1 && !robust))
+}
+ar_test <- function(r, j) {
+  rows <- r$rows; e <- r$e
+  el <- lapply(seq_along(rows), function(i) { ri <- rows[[i]]; v <- numeric(length(e[[i]]))
+    for (a in seq_along(v)) { b <- which(ri$t == ri$t[a] - j); if (length(b)) v[a] <- e[[i]][b] }; v })
+  d0 <- sum(mapply(function(a, b) sum(a * b), el, e)); Xl <- Reduce(`+`, lapply(seq_along(rows), function(i) t(el[[i]]) %*% rows[[i]]$X))
+  c1 <- sum(mapply(function(a, b) sum(a * b)^2, el, e))
+  zs <- Reduce(`+`, lapply(seq_along(rows), function(i) t(rows[[i]]$Z) %*% e[[i]] * sum(e[[i]] * el[[i]])))
+  A <- solve(r$XZ %*% r$Wt %*% t(r$XZ)); c2 <- -2 * as.numeric(Xl %*% A %*% r$XZ %*% r$Wt %*% zs); c3 <- as.numeric(Xl %*% r$Vb %*% t(Xl))
+  d0 / sqrt(c1 + c2 + c3)
+}
+```
+
+```{r p3-ej4}
+N <- 46; Tt <- 30                                                 # el motor usa N y Tt globales
+regsC <- list(`L.ln_sales` = lagm(SS, 1), ln_price = mk("ln_price"), ndi = mk("ndi"), cpi = mk("cpi"), pop16 = mk("pop16"))
+ivC   <- list(mk("ln_price"), mk("ndi"), mk("cpi"), mk("pop16"))
+ab1 <- gmm_est(SS, regsC, gmm = list(lagm(SS, 1)), collapse = TRUE, ivfd = ivC, step = 1, robust = TRUE)
+ab2 <- gmm_est(SS, regsC, gmm = list(lagm(SS, 1)), collapse = TRUE, ivfd = ivC, step = 2, robust = TRUE)
+dg <- function(r) c(N = r$n, instrumentos = r$ninst, AR1 = ar_test(r, 1), AR2 = ar_test(r, 2), Sargan = r$sargan, `p(Sargan)` = pchisq(r$sargan, r$df, lower.tail = FALSE),
+                    Hansen = r$hansen, `p(Hansen)` = pchisq(r$hansen, r$df, lower.tail = FALSE))
+kable(rbind(`un paso` = c(ab1$coef, dg(ab1)), `dos pasos` = c(ab2$coef, dg(ab2))), digits = 4)
+kable(rbind(`un paso (EE)` = ab1$se, `dos pasos (EE)` = ab2$se), digits = 7)
+c(dif_1paso = dif(c(ab1$coef, ab1$se), c(.9975072, -.0935868, .000016, -.0016501, .0000646, .0460666, .0323942, 3.63e-06, .000338, .000038)),
+  dif_2pasos = dif(c(ab2$coef, ab2$se), c(.946648, -.112763, .0000137, -.0014292, .000102, .0786545, .0423575, 5.07e-06, .0004688, .0000635)),
+  dif_Sargan_Hansen = dif(c(ab1$sargan, ab1$hansen), c(255.58, 40.47)))
+```
+
+**Tabla comparativa** (como la Tabla 19 del PDF R):
+
+```{r p3-tabla}
+tab19 <- data.frame(POLS = c(coef(po)["ln_price"], sqrt(diag(Vpo))["ln_price"]), FE = c(coef(fe)["ln_price"], sqrt(diag(V_fe_cl))["ln_price"]),
+                    `IV (AH)` = c(bah[2], sqrt(diag(Vah))[2]), `GMM 1 paso` = c(ab1$coef["ln_price"], ab1$se["ln_price"]),
+                    `GMM 2 pasos` = c(ab2$coef["ln_price"], ab2$se["ln_price"]), row.names = c("elasticidad precio (ln_price)", "(EE)"), check.names = FALSE)
+kable(tab19, digits = 4)
+c(rho_largo_plazo_1paso = unname(ab1$coef["ln_price"] / (1 - ab1$coef["L.ln_sales"])), rho_largo_plazo_2pasos = unname(ab2$coef["ln_price"] / (1 - ab2$coef["L.ln_sales"])))
+```
+
+> **⚠️ DISCREPANCIA 13 (la interpretación omite los tests de especificación y la persistencia casi unitaria).** El PDF R concluye que $\log S_{t-1}$ es "estadísticamente significativa al 1 %" y que la elasticidad cae a −0,094 / −0,113, pero **no comenta** que: (i) el test de **Hansen rechaza al 5 %** (p = 0,046) y el de Sargan rechaza fuertemente (p = 0,000); (ii) el test **AR(2) rechaza** (p = 0,037 y 0,027), lo que contradice la validez de los instrumentos $L.\log S$ (necesitan ausencia de correlación serial de segundo orden en las diferencias); (iii) el coeficiente de $\log S_{t-1}$ es **0,9975** (un paso) —prácticamente una raíz unitaria— con lo que la elasticidad de **largo plazo** $\beta/(1-\tau)$ es ≈ −37 (un paso) y ≈ −2,1 (dos pasos), valores económicamente implausibles frente al −0,4 de FE; y (iv) con $\tau\approx1$ los instrumentos en niveles son débiles. Es decir, la comparación con POLS/FE debe hacerse con estas salvedades.
+
+---
+
+# Resumen de discrepancias
+
+| # | Parte | Tipo | Descripción |
+|---|---|---|---|
+| 1 | 1 | Menor (enunciado/código) | El enunciado cita la "ecuación (8)" para la ecuación de interés (es la (1)); el `.do` cita Chamberlain (1978) y (1980). |
+| 2 | 1, Ej. 1 | **Resolución vs. sus tablas** | El texto dice que el sesgo aumenta con $N$ (de hecho lo muestran las tablas) y no explica por qué: el estimador no es consistente. |
+| 3 | 1 | **Código** | La segunda etapa de Wooldridge se estima con **toda** la muestra (con $y=s=0$ para las no seleccionadas) en vez de sólo con $s=1$; causa del sesgo que no desaparece con $N$. Diagnóstico verificado en R. |
+| 4 | 1, Ej. 2 | Código vs. enunciado | Los "residuos de selección" que se remuestrean son los de la regresión MCO de la variable censurada $s$, no los errores de la ecuación latente. |
+| 5 | 1, Ej. 2 | **Resolución incompleta / incoherente** | No hay conclusiones; los IC bootstrap de $\beta$ (p. ej. [5,65; 6,34]) no contienen $\beta=1$ ni la estimación ni los IC asintóticos ([1,56; 3,18]). |
+| 6 | 2 | **No replicable / código** | Kiviet no puede replicarse en R (no hay `xtlsdvc`); el `.do` tiene un error (`within_x=yL1-mean_x`) y el denominador $NT-N-T-K+1$. |
+| 7 | 2, Ej. 1 | Resolución incompleta | No se responde "qué estimador debiera utilizarse en la práctica". |
+| 8 | 2, Ej. 4 | Resolución incompleta | No se comenta el problema de los instrumentos débiles pedido. |
+| 9 | 2, Ej. 6 | **Referencia equivocada / comparación benévola** | Dice comparar con "BB, Tabla 2(a)" (es la de AB, Tabla 1); y llama "semejantes" a resultados de AH muy distintos (desvío 7,16 vs. 0,27). |
+| 10 | 2, Ej. 7 | Comparación benévola | Las medias y desvíos de AB/BB difieren materialmente de la Tabla 2(a) de BB (p. ej. SYS 0,895/0,092 vs. 0,810/0,162); el diseño no coincide con el de BB. |
+| 11 | 3, Ej. 2 | Resolución incompleta | Sólo se muestra `sigmamore` y no se menciona que el Hausman clásico tiene $V$ no definida positiva (rango 3). |
+| 12 | 3, Ej. 3 | Menor | No se comenta $\hat\tau=4{,}96>1$ (explosivo, instrumento débil). |
+| 13 | 3, Ej. 4 | **Interpretación incompleta** | No se comentan el rechazo de Hansen (p = 0,046) y de AR(2) (p ≈ 0,03) ni que $\hat\tau\approx0{,}9975$ implica una elasticidad de largo plazo absurda. |

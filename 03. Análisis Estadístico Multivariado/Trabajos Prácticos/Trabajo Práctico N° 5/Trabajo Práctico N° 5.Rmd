@@ -1,0 +1,382 @@
+---
+title: "Trabajo Práctico N° 5"
+subtitle: "Maestría en Econometría UTDT - Análisis Estadístico Multivariado"
+author: "Juan Menduiña"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: false
+    self_contained: true
+    df_print: paged
+lang: es
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.align = "center", fig.width = 8, fig.height = 5)
+options(digits = 7, OutDec = ".")
+
+if (!requireNamespace("haven", quietly = TRUE)) install.packages("haven")
+library(haven)
+
+# Carpeta con las bases (ind.dta, ipc2dig.dta).
+# Se asume que este Rmd está en la carpeta "Trabajo Práctico N° 5".
+datos <- "Datos"
+
+# Formato con coma decimal, como en el informe
+fmt <- function(x, d = 4) format(x, digits = d, decimal.mark = ",")
+tabla <- function(x, d = 4, ...) knitr::kable(x, digits = d, format.args = list(decimal.mark = ","), ...)
+tabla_mv <- function(x) knitr::kable(x, digits = 4, format.args = list(decimal.mark = ","), na = "")
+
+#-------------------------------------------------------------------------------
+# Tests de normalidad y diagonalidad (equivalentes a "mvtest" de Stata)
+#-------------------------------------------------------------------------------
+
+decision <- function(p) {
+  ifelse(p < 0.01, "Rechaza H0 al 1%",
+  ifelse(p < 0.05, "Rechaza H0 al 5%",
+  ifelse(p < 0.10, "Rechaza H0 al 10%", "No rechaza H0 (10%)")))
+}
+
+fila <- function(prueba, valor, est, dist, p) {
+  data.frame(Prueba = prueba, Valor = valor, `Estadístico` = est, `Distribución` = dist,
+             `Valor p` = p, `Decisión` = decision(p), check.names = FALSE)
+}
+
+# mvtest normality, stats(all): Mardia (asimetría y curtosis), Henze-Zirkler y Doornik-Hansen
+mv_normalidad <- function(X) {
+  X <- as.matrix(X); n <- nrow(X); p <- ncol(X)
+  Xc <- sweep(X, 2, colMeans(X))
+  Sml <- crossprod(Xc) / n
+  M <- Xc %*% solve(Sml) %*% t(Xc)
+
+  b1 <- sum(M^3) / n^2
+  b2 <- sum(diag(M)^2) / n
+  kappa <- (p + 1) * (n + 1) * (n + 3) / (n * ((n + 1) * (p + 1) - 6))
+  chi_sk <- n * kappa * b1 / 6; df_sk <- p * (p + 1) * (p + 2) / 6
+  chi_ku <- ((b2 - p * (p + 2)) / sqrt(8 * p * (p + 2) / n))^2
+
+  beta <- (1 / sqrt(2)) * ((2 * p + 1) * n / 4)^(1 / (p + 4))
+  Dj <- diag(M); Djk <- outer(Dj, Dj, "+") - 2 * M
+  HZ <- n * (sum(exp(-beta^2 / 2 * Djk)) / n^2 -
+             2 * (1 + beta^2)^(-p / 2) * mean(exp(-beta^2 / (2 * (1 + beta^2)) * Dj)) +
+             (1 + 2 * beta^2)^(-p / 2))
+  a <- 1 + 2 * beta^2; w <- (1 + beta^2) * (1 + 3 * beta^2)
+  mu <- 1 - a^(-p / 2) * (1 + p * beta^2 / a + p * (p + 2) * beta^4 / (2 * a^2))
+  s2 <- 2 * (1 + 4 * beta^2)^(-p / 2) +
+    2 * a^(-p) * (1 + 2 * p * beta^4 / a^2 + 3 * p * (p + 2) * beta^8 / (4 * a^4)) -
+    4 * w^(-p / 2) * (1 + 3 * p * beta^4 / (2 * w) + p * (p + 2) * beta^8 / (2 * w^2))
+  lm <- log(sqrt(mu^4 / (s2 + mu^2))); lv <- log((s2 + mu^2) / mu^2)
+  chi_hz <- ((log(HZ) - lm) / sqrt(lv))^2
+
+  Z <- Xc %*% diag(1 / sqrt(diag(Sml)), p)
+  e <- eigen(crossprod(Z) / n, symmetric = TRUE)
+  Y <- Z %*% e$vectors %*% diag(1 / sqrt(e$values), p) %*% t(e$vectors)
+  sk <- apply(Y, 2, function(y) mean(y^3) / mean(y^2)^1.5)
+  ku <- apply(Y, 2, function(y) mean(y^4) / mean(y^2)^2)
+  bs <- 3 * (n^2 + 27 * n - 70) * (n + 1) * (n + 3) / ((n - 2) * (n + 5) * (n + 7) * (n + 9))
+  W2 <- -1 + sqrt(2 * (bs - 1)); dl <- 1 / sqrt(log(sqrt(W2)))
+  yv <- sk * sqrt((W2 - 1) * (n + 1) * (n + 3) / (12 * (n - 2)))
+  z1 <- dl * log(yv + sqrt(yv^2 + 1))
+  d <- (n - 3) * (n + 1) * (n^2 + 15 * n - 4)
+  aa <- (n - 2) * (n + 5) * (n + 7) * (n^2 + 27 * n - 70) / (6 * d)
+  cc <- (n - 7) * (n + 5) * (n + 7) * (n^2 + 2 * n - 5) / (6 * d)
+  kk <- (n + 5) * (n + 7) * (n^3 + 37 * n^2 + 11 * n - 313) / (12 * d)
+  al <- aa + sk^2 * cc
+  chi <- (ku - 1 - sk^2) * 2 * kk
+  z2 <- (((chi / (2 * al))^(1 / 3)) - 1 + 1 / (9 * al)) * sqrt(9 * al)
+  DH <- sum(z1^2 + z2^2)
+
+  rbind(
+    fila("Mardia mSkewness", b1, chi_sk, paste0("chi2(", df_sk, ")"), pchisq(chi_sk, df_sk, lower.tail = FALSE)),
+    fila("Mardia mKurtosis", b2, chi_ku, "chi2(1)", pchisq(chi_ku, 1, lower.tail = FALSE)),
+    fila("Henze-Zirkler", HZ, chi_hz, "chi2(1)", pchisq(chi_hz, 1, lower.tail = FALSE)),
+    fila("Doornik-Hansen", NA_real_, DH, paste0("chi2(", 2 * p, ")"), pchisq(DH, 2 * p, lower.tail = FALSE))
+  )
+}
+
+# Estadístico LR de independencia (todas las correlaciones nulas), con ajuste de Bartlett.
+# Es el "LR test: independent vs. saturated" de Stata y el test de diagonalidad de "mvtest covariances".
+mv_diagonalidad <- function(X, nombre = "Diagonalidad (LR ajustado)") {
+  X <- as.matrix(X); n <- nrow(X); p <- ncol(X); R <- cor(X)
+  ch <- -(n - 1 - (2 * p + 5) / 6) * log(det(R)); df <- p * (p - 1) / 2
+  fila(nombre, NA_real_, ch, paste0("chi2(", df, ")"), pchisq(ch, df, lower.tail = FALSE))
+}
+
+# "LR test: independent vs. saturated" que muestra "factor" en Stata: usa el factor de corrección
+# N - (2p+5)/6 (a diferencia de "mvtest covariances, diagonal", que usa N - 1 - (2p+5)/6)
+lr_independencia <- function(X) {
+  X <- as.matrix(X); n <- nrow(X); p <- ncol(X)
+  ch <- -(n - (2 * p + 5) / 6) * log(det(cor(X))); df <- p * (p - 1) / 2
+  list(chi2 = ch, df = df, p = pchisq(ch, df, lower.tail = FALSE))
+}
+
+#-------------------------------------------------------------------------------
+# Análisis factorial
+#-------------------------------------------------------------------------------
+
+# Factores principales (Stata: factor, pf): comunalidades iniciales = correlación múltiple al
+# cuadrado (SMC), sin iterar; autovalores/autovectores de la matriz de correlaciones reducida
+pf_fit <- function(X) {
+  R <- cor(X)
+  Rr <- R; diag(Rr) <- 1 - 1 / diag(solve(R))
+  e <- eigen(Rr, symmetric = TRUE)
+  list(R = R, ev = e$values, V = e$vectors, n = nrow(X), p = ncol(X), nombres = colnames(X))
+}
+
+# Matriz de cargas de los primeros m factores (signo: suma de cada columna positiva)
+pf_cargas <- function(f, m) {
+  L <- f$V[, 1:m, drop = FALSE] %*% diag(sqrt(f$ev[1:m]), m)
+  for (k in 1:m) if (sum(L[, k]) < 0) L[, k] <- -L[, k]
+  dimnames(L) <- list(f$nombres, paste0("Factor", 1:m))
+  L
+}
+
+# Tabla de autovalores estilo "factor" de Stata (la proporción se calcula sobre la suma de
+# todos los autovalores, que incluye los negativos, por lo que el acumulado puede superar 1)
+tabla_pf <- function(ev) {
+  data.frame(Autovalor = ev, Diferencia = c(-diff(ev), NA),
+             Proporción = ev / sum(ev), Acumulada = cumsum(ev / sum(ev)),
+             row.names = paste0("Factor", seq_along(ev)))
+}
+
+# Factorización por máxima verosimilitud; si el optimizador falla con el inicio por defecto,
+# se prueban inicios aleatorios (el do-file usa "factor, ml")
+ml_fa <- function(R, m, N) {
+  r <- tryCatch(factanal(covmat = R, factors = m, n.obs = N, rotation = "none"),
+                error = function(e) NULL)
+  s <- 0
+  while (is.null(r) && s < 100) {
+    s <- s + 1
+    set.seed(s)
+    r <- tryCatch(factanal(covmat = R, factors = m, n.obs = N, rotation = "none",
+                           start = runif(nrow(R), 0.2, 0.8),
+                           control = list(lower = 0.005, opt = list(maxit = 2000))),
+                  error = function(e) NULL)
+  }
+  r
+}
+
+# Test de determinación del número de factores (ftest.do): contrasta H0: el modelo con m
+# factores es adecuado, con el estadístico (N-1-(2p+4m+5)/6) * (ln|V0| - ln|C|)
+ftest_r <- function(X, ms, alpha = 0.05) {
+  N <- nrow(X); p <- ncol(X); Co <- cor(X)
+  filas <- lapply(ms, function(m) {
+    gl <- ((p - m)^2 - (p + m)) / 2
+    fa <- if (gl > 0) ml_fa(Co, m, N) else NULL
+    if (is.null(fa)) return(data.frame(Factores = m, `Estadístico` = NA, gl = gl,
+                                       `Valor crítico` = NA, `Valor p` = NA, AIC = NA, check.names = FALSE))
+    Vo <- fa$loadings %*% t(fa$loadings) + diag(fa$uniquenesses)
+    dif <- log(det(Vo)) - log(det(Co))
+    est <- ((N - 1) - (2 * p + 4 * m + 5) / 6) * dif
+    data.frame(Factores = m, `Estadístico` = est, gl = gl,
+               `Valor crítico` = qchisq(1 - alpha, gl), `Valor p` = pchisq(est, gl, lower.tail = FALSE),
+               AIC = N * dif - ((p - m)^2 - p - m), check.names = FALSE)
+  })
+  do.call(rbind, filas)
+}
+```
+
+# Ejercicio 1
+
+*El archivo "ind.dta" contiene información sobre 17 indicadores económicos:*
+
+```{r ej1-datos}
+ind <- as.data.frame(read_dta(file.path(datos, "ind.dta")))
+vars1 <- paste0("x", 1:17)
+X1 <- ind[vars1]
+indicadores <- c("Agricultural land (% of land area)", "Agriculture, value added (% of GDP)",
+  "CO2 emissions (metric tons per capita)", "Exports of goods and services (% of GDP)",
+  "Fertility rate, total (births per woman)", "Fixed line and mobile phone subscribers (per 1000 people)",
+  "GDP growth (annual)", "Immunization, measles (% of children ages 12-23 months)",
+  "Imports of goods and services (% of GDP)", "Industry, value added (% of GDP)",
+  "Inflation, GDP deflator (annual %)", "Internet users (per 1000 people)",
+  "Life expectancy at birth, total (years)", "Merchandise trade (% of GDP)",
+  "Mortality rate, infant (per 1000 live births)", "Mortality rate, under 5 (per 1000)",
+  "Population growth (annual %)")
+data.frame(Variable = toupper(vars1), Indicador = indicadores)
+dim(X1)
+```
+
+## (a) Realizar un test de normalidad multivariada.
+
+```{r ej1-a}
+tabla_mv(mv_normalidad(X1))
+```
+
+Por lo tanto, con un nivel de significancia del 1%, estos datos aportan evidencia suficiente para indicar que no tienen una distribución normal multivariada.
+
+Se repite el test sobre las variables transformadas con logaritmo. Los valores no positivos (por ejemplo, tasas de crecimiento o inflación negativas, o ceros) generan valores faltantes, y las observaciones correspondientes se descartan, como hace Stata:
+
+```{r ej1-a-log}
+logs1 <- log(X1)
+logs1[] <- lapply(logs1, function(x) ifelse(is.finite(x), x, NA))   # log(0) = -Inf en R; faltante en Stata
+n_log1 <- sum(complete.cases(logs1))
+tabla_mv(mv_normalidad(logs1[complete.cases(logs1), ]))
+```
+
+Por lo tanto, con un nivel de significancia del 1%, estos datos aportan evidencia suficiente para indicar que no tienen una distribución normal multivariada.
+
+> *Nota: el PDF no indica con cuántas observaciones se hizo el test con logaritmos; al descartar las filas con valores no positivos, la muestra se reduce de `r nrow(X1)` a `r n_log1` observaciones.*
+
+## (b) Determinar el número de factores a extraer.
+
+Método de factores principales (`factor, pf`) sobre la matriz de correlaciones:
+
+```{r ej1-b-pf}
+f1 <- pf_fit(X1)
+tabla(tabla_pf(f1$ev), d = 5)
+lr1 <- lr_independencia(X1)
+```
+
+LR test: independent vs. saturated: chi2(`r lr1$df`) = `r fmt(lr1$chi2, 6)`, Prob > chi2 = `r fmt(lr1$p, 4)`.
+
+Cargas factoriales y varianzas únicas (unicidades) con 10 factores retenidos (los de autovalor positivo):
+
+```{r ej1-b-cargas}
+L10 <- pf_cargas(f1, 10)
+tabla(cbind(L10, Uniqueness = 1 - rowSums(L10^2)), d = 4)
+```
+
+Test de determinación del número de factores (modelo de máxima verosimilitud, nivel de significancia del 5%). Se evalúan los números de factores para los cuales el modelo tiene grados de libertad positivos:
+
+```{r ej1-b-ftest}
+ft1 <- ftest_r(X1, 1:11, alpha = 0.05)
+tabla(ft1, d = 4)
+factors1 <- ft1$Factores[which(ft1[["Valor p"]] >= 0.05)[1]]
+```
+
+El menor número de factores para el cual no se rechaza el modelo al 5% es `r factors1`.
+
+Por lo tanto, el número de factores a extraer es `r factors1`.
+
+## (c) Realizar el análisis exploratorio de acuerdo con el modelo factorial.
+
+```{r ej1-c}
+L6 <- pf_cargas(f1, factors1)
+uniq6 <- 1 - rowSums(L6^2)
+tabla(cbind(L6, Uniqueness = uniq6), d = 4)
+```
+
+Con `r factors1` factores, la matriz de correlaciones se reproduce como $\hat{\Sigma} = \Lambda\Lambda' + \Psi$ (los factores no están rotados y son ortogonales, por lo que $\Phi = I$):
+
+```{r ej1-c-sigma}
+sigma_hat1 <- L6 %*% t(L6) + diag(uniq6)
+# Diagonal = 1 por construcción; error de reproducción de las correlaciones fuera de la diagonal
+dif1 <- (f1$R - sigma_hat1)[upper.tri(f1$R)]
+c(`Error absoluto medio` = mean(abs(dif1)), `Error absoluto máximo` = max(abs(dif1)))
+```
+
+## (d) Reportar las comunalidades.
+
+La comunalidad de cada variable es la parte de su varianza explicada por los factores comunes, $h_i^2 = 1 - \psi_i$:
+
+```{r ej1-d}
+comunalidad1 <- 1 - uniq6
+tabla(data.frame(Variable = vars1, Comunalidad = comunalidad1), d = 8)
+```
+
+
+# Ejercicio 2
+
+*El archivo "ipc2dig.dta" contiene datos sobre variaciones mensuales de precios desagregados en componentes de la canasta básica de alimentos para el período comprendido entre marzo de 2022 y marzo de 2006.*
+
+```{r ej2-datos}
+ipc <- as.data.frame(read_dta(file.path(datos, "ipc2dig.dta")))
+vars2 <- paste0("div", 1:26)
+X2 <- ipc[vars2]
+dim(X2)
+```
+
+> *Nota: el enunciado del PDF dice "entre marzo de 2022 y marzo de 2006", que es evidentemente una errata (el período termina en 2006). Con las `r nrow(X2)` observaciones mensuales de la base, el período sería de enero de 2002 a marzo de 2006, lo que sugiere que el comienzo es de 2002 y no de 2022; la base no incluye una variable de fecha que permita verificarlo.*
+
+## (a) Realizar un análisis factorial y determinar el número de factores a considerar en el mismo.
+
+```{r ej2-a-norm}
+tabla_mv(mv_normalidad(X2))
+```
+
+Por lo tanto, con un nivel de significancia del 1%, estos datos aportan evidencia suficiente para indicar que no tienen una distribución normal multivariada.
+
+Test de determinación del número de factores (máxima verosimilitud, nivel del 5%):
+
+```{r ej2-a-ftest}
+ft2 <- ftest_r(X2, 1:12, alpha = 0.05)
+tabla(ft2, d = 4)
+factors2 <- ft2$Factores[which(ft2[["Valor p"]] >= 0.05)[1]]
+```
+
+El menor número de factores para el cual no se rechaza el modelo al 5% es `r factors2`.
+
+Análisis factorial por el método de factores principales:
+
+```{r ej2-a-pf}
+f2 <- pf_fit(X2)
+tabla(tabla_pf(f2$ev), d = 5)
+lr2 <- lr_independencia(X2)
+```
+
+LR test: independent vs. saturated: chi2(`r lr2$df`) = `r fmt(lr2$chi2, 6)`, Prob > chi2 = `r fmt(lr2$p, 4)`.
+
+```{r ej2-a-cargas}
+L4 <- pf_cargas(f2, factors2)
+uniq4 <- 1 - rowSums(L4^2)
+tabla(cbind(L4, Uniqueness = uniq4), d = 4)
+```
+
+Por lo tanto, el número de factores a considerar en el análisis factorial es `r factors2`.
+
+## (b) Estimar los factores.
+
+Los factores se estiman por regresión (método de Thomson, el que usa `predict` en Stata): $\hat{F} = Z R^{-1}\Lambda$, donde $Z$ son las variables estandarizadas y $R^{-1}\Lambda$ son los coeficientes de scoring:
+
+```{r ej2-b}
+R2 <- f2$R
+B2 <- solve(R2) %*% L4                       # coeficientes de scoring
+dimnames(B2) <- list(vars2, colnames(L4))
+tabla(B2, d = 5)
+
+Z2 <- scale(as.matrix(X2))
+factores2 <- Z2 %*% B2                       # estimación de los factores (51 x 4)
+head(round(factores2, 4), 10)
+```
+
+## (c) Analizar los residuos del modelo, con arreglo a los supuestos considerados.
+
+Los residuos del modelo son $\hat{e} = X_{centrada} - \hat{F}\Lambda'$ (como en el do-file):
+
+```{r ej2-c}
+Xc2 <- sweep(as.matrix(X2), 2, colMeans(X2))
+resid2 <- Xc2 - factores2 %*% t(L4)
+tabla_mv(rbind(mv_normalidad(resid2), mv_diagonalidad(resid2)))
+```
+
+Por lo tanto, con un nivel de significancia del 1%, estos datos aportan evidencia suficiente para indicar que los residuos no tienen una distribución normal multivariada. Además, con un nivel de significancia del 1%, estos datos aportan evidencia suficiente para indicar que la matriz de varianzas y covarianzas de los residuos no es diagonal.
+
+```{r ej2-c-anot}
+resid2_std <- Z2 - factores2 %*% t(L4)                 # residuos con variables estandarizadas
+tab_std <- rbind(mv_normalidad(resid2_std), mv_diagonalidad(resid2_std))
+tab_do <- rbind(mv_normalidad(resid2), mv_diagonalidad(resid2))
+```
+
+> **⚠ Anotación (observación metodológica sobre cómo se calculan los residuos):** las cargas $\Lambda$ y los scores se estiman con las variables **estandarizadas** (el análisis factorial de Stata trabaja sobre la matriz de correlaciones), pero el do-file resta $\hat{F}\Lambda'$ a las variables solo **centradas** (en sus unidades originales). Así, los residuos mezclan escalas y no son los residuos del modelo factorial estandarizado. Con los residuos correctamente estandarizados ($Z - \hat{F}\Lambda'$), los tests de Mardia y Henze-Zirkler dan exactamente lo mismo (son invariantes ante transformaciones lineales de los datos), pero cambian el de Doornik-Hansen (`r fmt(tab_do[4, "Estadístico"], 6)` con el cálculo del PDF frente a `r fmt(tab_std[4, "Estadístico"], 6)` con residuos estandarizados) y el de diagonalidad (`r fmt(tab_do[5, "Estadístico"], 6)` frente a `r fmt(tab_std[5, "Estadístico"], 6)`). Las conclusiones del informe no cambian, ya que, en ambos casos, todos los valores p de Doornik-Hansen y de diagonalidad son menores a 0,01, pero los estadísticos del PDF no corresponden a los residuos estandarizados.
+
+## (d) Obtener las principales medidas estadísticas que permitan inferir acerca de la bondad del ajuste del modelo estimado.
+
+**Coeficiente de correlación al cuadrado entre cada variable observable y los factores** (según el do-file, $\rho_i^2 = 1 - \psi_i^2$):
+
+```{r ej2-d}
+rho2 <- 1 - uniq4^2
+comunalidad2 <- 1 - uniq4
+tabla(data.frame(Variable = vars2, `rho2 = 1 - psi^2 (PDF)` = rho2,
+                 `Comunalidad = 1 - psi` = comunalidad2, check.names = FALSE), d = 8)
+
+r2 <- 1 - (prod(uniq4) / det(R2))^(1 / length(vars2))
+```
+
+Coeficiente de determinación = `r fmt(r2, 8)`.
+
+> **⚠ Anotación (el cálculo del PDF no coincide con la definición del coeficiente):** el do-file calcula $\rho_i^2 = 1 - \psi_i^2$, elevando la unicidad **al cuadrado**; sin embargo, la unicidad $\psi_i$ ya es una varianza (la parte de la varianza de la variable estandarizada que no explican los factores), de modo que el cuadrado de la correlación múltiple entre la variable $i$ y los factores comunes (su comunalidad) es $h_i^2 = 1 - \psi_i$, no $1 - \psi_i^2$. Por eso, los valores del informe (columna "rho2") sobrestiman el ajuste: por ejemplo, para `div1` el informe da `r fmt(rho2[1], 5)` frente a una comunalidad de `r fmt(comunalidad2[1], 5)`, y para `div7`, `r fmt(rho2[7], 5)` frente a `r fmt(comunalidad2[7], 5)`. Las conclusiones cualitativas sobre qué variables están mejor explicadas (por ejemplo, `div6`, `div10` y `div25`) no cambian, pero los niveles de ajuste correctos son los de la columna "Comunalidad".
+
+> *Nota sobre el coeficiente de determinación global:* $R^2 = 1 - (|\Psi| / |R|)^{1/p}$ es una medida basada en la varianza generalizada. Su valor (`r fmt(r2, 4)`) es mucho menor que las comunalidades individuales (promedio `r fmt(mean(comunalidad2), 4)`) porque $|R|$ es muy pequeño: con 26 variables y solo 51 observaciones, la matriz de correlaciones tiene autovalores muy chicos que 4 factores no pueden reproducir, y esa medida es sensible a ellos. No debe leerse, entonces, como un mal ajuste general, sino como una señal de que los factores no reproducen las dimensiones de menor varianza.

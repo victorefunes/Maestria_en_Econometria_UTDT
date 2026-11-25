@@ -1,0 +1,370 @@
+---
+title: "Trabajo Práctico N° 5: Modelos de Variable Dependiente Discreta"
+subtitle: "Econometría de Datos de Panel — Maestría en Economía y Econometría, UTDT"
+author: "Victor Funes"
+date: "2022"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = TRUE, message = FALSE, warning = FALSE)
+library(haven)     # lectura de .dta
+library(numDeriv)  # jacobiano y hessiano numericos (metodo delta)
+library(survival)  # logit condicional (efectos fijos)
+library(knitr)
+
+# Diferencia maxima absoluta entre lo estimado en R y lo reportado en el PDF
+dif <- function(est, pdf) signif(max(abs(unname(est) - pdf)), 3)
+```
+
+> **Cómo leer este documento.** Cada inciso reúne (i) el enunciado de *Trabajo Práctico N° 5 (P).pdf*, (ii) la respuesta del PDF de resolución *Trabajo Práctico N° 5 (R).pdf*, (iii) la respuesta del solucionario *Trabajo Práctico N° 5 (S).pdf* y (iv) una **replicación en R** (todo el documento usa **sólo R**; el `.do` de Stata sirvió de guía). Los bloques `{r}` se ejecutan al tejer y leen `Datos/wagepan.dta`.
+> Como R base no trae `margins` ni `xtprobit/xtlogit`, se programaron los **modelos pooled, de efectos aleatorios (cuadratura de Gauss-Hermite) y los efectos marginales con método delta**. En cada replicación se reporta la **diferencia máxima** contra el PDF (`dif`).
+> Las inconsistencias entre enunciado, código, resolución y solucionario están marcadas con **⚠️ DISCREPANCIA**. Al final hay una tabla resumen.
+
+# Herramientas
+
+```{r datos}
+w <- as.data.frame(read_dta("Datos/wagepan.dta"))
+w <- w[order(w$nr, w$year), ]                              # equivale a xtset nr year
+c(personas = length(unique(w$nr)), anios = length(unique(w$year)), obs = nrow(w), sindicalizados = sum(w$union))
+```
+
+```{r funciones}
+cdf  <- function(z, link) if (link == "probit") pnorm(z) else plogis(z)                      # F(z)
+dens <- function(z, link) if (link == "probit") dnorm(z) else plogis(z) * (1 - plogis(z))    # f(z) = F'(z)
+
+# Modelo binario pooled por maxima verosimilitud; vcov = inversa de la informacion OBSERVADA (como Stata)
+bin_fit <- function(y, X, link) {
+  nll <- function(b) { z <- drop(X %*% b); -sum(ifelse(y == 1, log(cdf(z, link)), log(1 - cdf(z, link)))) }
+  st  <- coef(suppressWarnings(glm(y ~ X - 1, binomial(link))))
+  o   <- optim(st, nll, method = "BFGS", control = list(reltol = 1e-13))
+  V   <- solve(hessian(nll, o$par)); b <- setNames(o$par, colnames(X)); dimnames(V) <- list(colnames(X), colnames(X))
+  list(coef = b, vcov = V, ll = -o$value, link = link)
+}
+# Varianza robusta clusterizada (sandwich con la informacion observada y ajuste G/(G-1) de Stata)
+bin_robust <- function(fit, y, X, id) {
+  z <- drop(X %*% fit$coef); F <- cdf(z, fit$link); f <- dens(z, fit$link)
+  si <- rowsum(((y - F) / (F * (1 - F)) * f) * X, id); G <- nrow(si)
+  G / (G - 1) * fit$vcov %*% crossprod(si) %*% fit$vcov
+}
+# Efecto parcial de la columna j de X: promedio muestral (at = NULL) o en un punto 'at'; EE por metodo delta
+pe <- function(b, V, X, link, j, at = NULL) {
+  k <- ncol(X); f <- if (is.null(at)) function(th) mean(th[j] * dens(drop(X %*% th[1:k]), link))
+                     else function(th) th[j] * dens(sum(th[1:k] * at), link)
+  J <- jacobian(f, b); c(efecto = f(b), ee = sqrt(drop(J %*% V %*% t(J))))
+}
+
+# Gauss-Hermite (nodos y pesos) y probit/logit de efectos aleatorios (panel balanceado), parametrizacion /lnsig2u como Stata
+gh <- function(n) { i <- seq_len(n - 1); J <- matrix(0, n, n); J[cbind(i, i + 1)] <- J[cbind(i + 1, i)] <- sqrt(i / 2)
+  e <- eigen(J, symmetric = TRUE); o <- order(e$values); list(x = e$values[o], w = sqrt(pi) * e$vectors[1, o]^2) }
+re_fit <- function(y, X, id, link, nq = 64) {
+  Ng <- length(unique(id)); Tn <- length(y) / Ng; S <- matrix(2 * y - 1, Ng, Tn, byrow = TRUE); q <- gh(nq)
+  lf <- function(a) if (link == "probit") pnorm(a, log.p = TRUE) else plogis(a, log.p = TRUE)
+  nll <- function(th) {
+    b <- th[-length(th)]; sg <- sqrt(exp(th[length(th)])); Z <- matrix(drop(X %*% b), Ng, Tn, byrow = TRUE)
+    lg <- sapply(seq_len(nq), function(k) log(q$w[k] / sqrt(pi)) + rowSums(lf(S * (Z + sqrt(2) * sg * q$x[k]))))
+    m <- apply(lg, 1, max); -sum(m + log(rowSums(exp(lg - m)))) }
+  o <- optim(c(bin_fit(y, X, link)$coef, 0), nll, method = "BFGS", control = list(reltol = 1e-14, maxit = 1000))
+  o <- optim(o$par, nll, method = "BFGS", control = list(reltol = 1e-14, maxit = 1000))
+  V <- solve(hessian(nll, o$par)); nmz <- c(colnames(X), "lnsig2u"); names(o$par) <- nmz; dimnames(V) <- list(nmz, nmz)
+  list(coef = o$par, vcov = V, ll = -o$value, link = link, sigma_u = sqrt(exp(o$par[length(o$par)])))
+}
+```
+
+> **Nota sobre los modelos de efectos aleatorios.** `xtprobit` y `xtlogit` de Stata usan cuadratura de Gauss-Hermite **adaptativa de 12 puntos** (*mvaghermite*). Aquí se integra con 64 nodos (no adaptativa), que es prácticamente exacta. Los resultados difieren de los del PDF en la 2ª–3ª cifra decimal (ver DISCREPANCIA 3).
+
+---
+
+# Ejercicio 1
+
+**Enunciado.** El archivo *wagepan.dta* contiene los datos utilizados por Vella y Verbeek (1998). Estos datos contienen información para 545 hombres que trabajaron cada año de 1980 a 1987. Utilice los datos para analizar el impacto de la escolaridad ($educ_{it}$) en la probabilidad de estar afiliado a un sindicato ($union_{it}$). Las variables se describen en el conjunto de datos. Observe que la educación no cambia con el tiempo.
+
+```{r ej1-datos}
+y <- w$union; X <- cbind(const = 1, educ = w$educ)
+c(educ_varia_en_el_tiempo = any(ave(w$educ, w$nr, FUN = var) > 0), media_educ = mean(w$educ))
+```
+
+## (a) POLS (modelo de probabilidad lineal)
+
+**Enunciado.** Use Pooled OLS para estimar $P(union_{it}=1\mid educ_{it})=\beta_0+\beta_1 educ_{it}$. De acuerdo a los resultados obtenidos, ¿tiene impacto un año más de escolaridad sobre la probabilidad de estar afiliado a un sindicato?
+
+**Resultado (PDF R):** N = 4360; $F(1,4358)$ = 0,16 (p = 0,6855); $R^2$ = 0,0000; `educ` −0,0015092 (0,0037264); constante 0,261795 (0,0443282).
+
+**Resolución (PDF R):** "... un año más de escolaridad no tiene impacto sobre la probabilidad de estar afiliado a un sindicato, ya que la variable *educ* no es estadísticamente significativa."
+
+**Solucionario (S):** "Si bien el coeficiente de interés estimado es negativo, $\hat\beta_1=-0{,}0015$, el mismo no es estadísticamente significativo. ... utilizar un modelo de probabilidad lineal cuando la variable dependiente es [binaria] tiene los mismos problemas que ... en una muestra de corte transversal: 1) Nada garantiza que el valor predicho esté entre 0 y 1, y 2) el modelo tiene heterocedasticidad por construcción."
+
+**Replicación en R:**
+
+```{r ej1-a}
+ols <- lm(union ~ educ, w)
+round(coef(summary(ols)), 7)
+c(N = nobs(ols), R2 = round(summary(ols)$r.squared, 4),
+  dif_coef = dif(coef(ols), c(.261795, -.0015092)), dif_ee = dif(coef(summary(ols))[, 2], c(.0443282, .0037264)))
+```
+
+> Los EE usuales de MCO son los de Stata; ni (R) ni (S) mencionan que, además, con 8 observaciones por persona deberían ser clusterizados (ver Ejercicio 1(g) donde sí se usa `vce(cluster nr)`).
+
+## (b) Probit pooled
+
+**Enunciado.** Use Pooled Probit para estimar $P(union_{it}=1\mid educ_{it})=\Phi(\beta_0+\beta_1 educ_{it})$. Comente sobre el impacto de un año más de educación en la probabilidad de estar afiliado a un sindicato.
+
+**Resultado (PDF R):** `educ` −0,0051242 (0,0122467); constante −0,6331107 (0,1454783); log-verosimilitud = −2422,7142; LR $\chi^2(1)$ = 0,17. Efecto marginal promedio: −0,0016074 (0,0038414); en la media (`educ` = 11,76697): −0,0016074 (0,0038416).
+
+**Resolución (PDF R):** "un año más de escolaridad no tiene impacto ..., ya que la variable *educ* no es estadísticamente significativa." **Solucionario (S):** el efecto parcial es $\partial P/\partial educ_{it}=\beta_1\phi(\beta_0+\beta_1 educ_{it})$; "un consenso en la práctica es evaluar en el promedio de las $x$ ... un año más de educación reduce la probabilidad ... en −0,0016, aunque esta caída no resulta estadísticamente significativa."
+
+**Replicación en R** (los EE de Stata usan la matriz de información **observada**; por eso no coinciden con los de `glm`, que usa la esperada):
+
+```{r ej1-b}
+pp <- bin_fit(y, X, "probit")
+round(rbind(coef = pp$coef, ee = sqrt(diag(pp$vcov))), 7)
+ame_p <- pe(pp$coef, pp$vcov, X, "probit", 2)                    # efecto marginal promedio
+mem_p <- pe(pp$coef, pp$vcov, X, "probit", 2, at = colMeans(X))   # efecto en la media
+rbind(promedio = ame_p, `en la media` = mem_p)
+c(ll = pp$ll, dif_coef = dif(pp$coef, c(-.6331107, -.0051242)), dif_ee = dif(sqrt(diag(pp$vcov)), c(.1454783, .0122467)),
+  dif_efectos = dif(c(ame_p, mem_p), c(-.0016074, .0038414, -.0016074, .0038416)))
+```
+
+## (c) Logit pooled y error estándar por método delta
+
+**Enunciado.** Use Pooled Logit para estimar $P(union_{it}=1\mid educ_{it})=\Lambda(\beta_0+\beta_1 educ_{it})$. Comente sobre el impacto de un año más de educación en la probabilidad de estar afiliado a un sindicato. Compute el error estándar para esta estimación.
+
+**Resultado (PDF R):** `educ` −0,0081586 (0,0201411); constante −1,034725 (0,2393549); log-verosimilitud = −2422,7197. Efecto marginal promedio −0,0015051 (0,0037154); en la media −0,0015051 (0,0037155).
+
+**Solucionario (S):** $\partial P/\partial educ=g(\beta_0,\beta_1)=\beta_1\Lambda(1-\Lambda)$; "Para computar el error estándar ... el Método Delta: $V(\widehat{\partial P/\partial educ})=\frac{\partial\hat g}{\partial\beta'}\hat V(\beta)\frac{\partial\hat g}{\partial\beta'}'$", con $\partial g/\partial\beta_1=\Lambda(1-\Lambda)+\beta_1[1-2\Lambda]\Lambda'\,educ$, $\partial g/\partial\beta_0=\beta_1[1-2\Lambda]\Lambda'$ y $\Lambda'=\Lambda(1-\Lambda)$.
+
+> **⚠️ DISCREPANCIA 1.** El enunciado pide **calcular el error estándar** y el `.do` lo programa a mano (matrices `G`, `V_md`, `se`), pero el PDF R **no muestra** ese cálculo manual: sólo reporta el EE que da `margins` (0,0037154 / 0,0037155). A continuación se hace el cálculo del `.do` y se verifica que coincide con `margins ... atmeans`.
+
+**Replicación en R:**
+
+```{r ej1-c}
+pl <- bin_fit(y, X, "logit")
+round(rbind(coef = pl$coef, ee = sqrt(diag(pl$vcov))), 7)
+ame_l <- pe(pl$coef, pl$vcov, X, "logit", 2); mem_l <- pe(pl$coef, pl$vcov, X, "logit", 2, at = colMeans(X))
+rbind(promedio = ame_l, `en la media` = mem_l)
+
+# Calculo manual del .do (metodo delta analitico, efecto en la media de educ)
+b0 <- pl$coef[1]; b1 <- pl$coef[2]; m <- mean(w$educ)
+p  <- plogis(b0 + b1 * m)
+G  <- c(b1 * (1 - 2 * p) * p * (1 - p),                         # dg/db0
+        p * (1 - p) + b1 * (1 - 2 * p) * p * (1 - p) * m)       # dg/db1
+se_manual <- sqrt(drop(G %*% pl$vcov %*% G))
+c(efecto = unname(b1 * p * (1 - p)), se_manual = se_manual, se_margins_PDF = .0037155)
+c(ll = pl$ll, dif_coef = dif(pl$coef, c(-1.034725, -.0081586)), dif_ee = dif(sqrt(diag(pl$vcov)), c(.2393549, .0201411)),
+  dif_efectos = dif(c(ame_l, mem_l), c(-.0015051, .0037154, -.0015051, .0037155)), dif_se_manual = dif(se_manual, .0037155))
+```
+
+**Tabla comparativa** (como la del `.do`, `keep(educ)`):
+
+```{r ej1-tabla}
+kable(data.frame(POLS = c(coef(ols)["educ"], coef(summary(ols))["educ", 2]),
+                 `Probit pooled (efecto marg.)` = ame_p, `Logit pooled (efecto marg.)` = ame_l,
+                 row.names = c("estimación", "(EE)"), check.names = FALSE), digits = 5)
+```
+
+> Los tres métodos dan el mismo resultado: el efecto de un año más de educación es ≈ −0,0015 a −0,0016 y **no es significativo**.
+
+## (d) Probit de efectos aleatorios
+
+**Enunciado.** Estime la siguiente extensión del modelo (2): $P(union_{it}=1\mid educ_{it},c_i)=\Phi(\beta_0+\beta_1educ_{it}+c_i)$ donde $c_i$ son efectos no observables individuales. Use el modelo Probit de efectos aleatorios. ¿Cuál es el problema que surge al momento de estimar el efecto parcial de interés?
+
+**Resultado (PDF R):** `educ` −0,0502723 (0,0493148); constante −0,8013208 (0,5835448); `/lnsig2u` 1,099022 (0,1137102); sigma_u = 1,732406; rho = 0,7500768; log-verosimilitud = −1672,7504; LR test de $\rho=0$: $\chi^2(1)$ = 1499,93. Efecto marginal en $c_i=0$ (`predict(pu0)`): promedio −0,0076285 (0,0075519); en la media −0,0076024 (0,0074781).
+
+**Resolución (PDF R) y Solucionario (S):** "El problema ... es que éste [el efecto parcial] depende de $c_i$, el cual no es estimado, por lo que no es posible estimar la magnitud del efecto parcial, a menos que se imponga el valor de $c_i$. Este valor impuesto puede ser $c_i=0$, lo cual tiene sentido ya que se está asumiendo que $c_i\mid X_i\sim\text{Normal}(0,\sigma_c^2)$." (S: −0,0076, no significativo.)
+
+**Replicación en R:**
+
+```{r ej1-d}
+rp <- re_fit(y, X, w$nr, "probit")
+round(rbind(coef = rp$coef, ee = sqrt(diag(rp$vcov))), 5)
+c(sigma_u = unname(rp$sigma_u), rho = unname(rp$sigma_u^2 / (1 + rp$sigma_u^2)), ll = rp$ll)
+kb <- ncol(X)
+pe0_p <- pe(rp$coef, rp$vcov, X, "probit", 2); pe0_pm <- pe(rp$coef, rp$vcov, X, "probit", 2, at = colMeans(X))
+# (pe usa los primeros k parametros y V completa (k+1), la derivada respecto de lnsig2u es cero)
+rbind(`promedio, c_i = 0` = pe0_p, `en la media, c_i = 0` = pe0_pm)
+```
+
+> **⚠️ DISCREPANCIA 3 (cuadratura de Stata).** Los coeficientes de RE de R difieren de los del PDF en la 2ª–3ª cifra (p. ej. `educ`: −0,0493 aquí vs. −0,0503 en el PDF; $\sigma_u$ 1,727 vs. 1,732; log-verosimilitud −1672,88 con integración casi exacta vs. −1672,75 que reporta Stata, y evaluada en los parámetros de Stata la verosimilitud exacta también da −1672,88). La causa es que Stata optimiza una verosimilitud **aproximada** con 12 puntos de Gauss-Hermite adaptativa, que sobreestima levemente la verdadera log-verosimilitud; no es un error de ninguno de los dos. Las conclusiones (efecto no significativo, $\rho\approx0{,}75$) son idénticas. El mismo comentario aplica a 1(e) y a 2(c).
+
+> **⚠️ DISCREPANCIA 4 (efecto en $c_i=0$ vs. efecto promedio).** (R) y (S) reportan el efecto marginal **en $c_i=0$** (−0,0076 en probit RE; −0,0059 en logit RE) como "el efecto parcial de interés", pero ese valor es sólo una **convención** (la única que permite `margins ... predict(pu0)`): el efecto de política relevante es el **efecto parcial promedio** sobre la distribución de $c_i$, que en el probit RE se obtiene re-escalando los coeficientes, $\beta_a=\beta/\sqrt{1+\sigma_u^2}$, y calculando $\beta_{1,a}\,\phi(\beta_{0,a}+\beta_{1,a}educ)$. Ni (R) ni (S) lo mencionan. Aquí ambos valores resultan casi iguales (−0,0076 vs. −0,0078; ver abajo), pero **ambos difieren del efecto del probit pooled (−0,0016)**: la diferencia es grande en magnitud, aunque inferior a un error estándar (0,0078), de modo que la conclusión (efecto no significativo) no cambia.
+
+```{r ej1-d-ape}
+# Efecto parcial promedio (sobre c_i) del probit RE: coeficientes escalados por (1 + sigma_u^2)^(-1/2)
+esc <- as.numeric(1 / sqrt(1 + rp$sigma_u^2)); ba <- rp$coef[1:2] * esc
+c(escala = esc, APE_RE_escalado = mean(ba[2] * dnorm(drop(X %*% ba))), efecto_en_ci_0 = unname(pe0_p["efecto"]),
+  APE_probit_pooled = unname(ame_p["efecto"]))
+```
+
+## (e) Logit de efectos aleatorios
+
+**Enunciado.** Estime la siguiente extensión del modelo (3): $P(union_{it}=1\mid educ_{it},c_i)=\Lambda(\beta_0+\beta_1educ_{it}+c_i)$. Use el modelo Logit de efectos aleatorios. ¿Surge el mismo problema que en el inciso anterior al momento de estimar el efecto parcial de interés?
+
+**Resultado (PDF R):** `educ` −0,0831898 (0,0841158); constante −1,497913 (0,9974077); `/lnsig2u` 2,248281 (0,1156237); sigma_u = 3,077571; rho = 0,7421998; log-verosimilitud = −1670,7204. Efecto marginal en $c_i=0$: promedio −0,0059833 (0,0061477); en la media −0,0059476 (0,0060407).
+
+**Resolución (PDF R):** "Sí, surge el mismo problema ... a la hora de estimar el efecto parcial de interés." **Solucionario (S):** $\partial P/\partial educ=\beta_1\frac{\exp(\cdot)}{(1+\exp(\cdot))^2}$; "no se puede estimar la magnitud ... a menos que insertemos el valor de $c_i$. Al calcular el efecto marginal en $c_i=0$ ... −0,0059, pero la caída no es estadísticamente significativa."
+
+**Replicación en R:**
+
+```{r ej1-e}
+rl <- re_fit(y, X, w$nr, "logit")
+round(rbind(coef = rl$coef, ee = sqrt(diag(rl$vcov))), 5)
+c(sigma_u = unname(rl$sigma_u), ll = rl$ll)
+rbind(`promedio, c_i = 0` = pe(rl$coef, rl$vcov, X, "logit", 2), `en la media, c_i = 0` = pe(rl$coef, rl$vcov, X, "logit", 2, at = colMeans(X)))
+```
+
+**Tabla comparativa RE** (como la del `.do`, `keep(educ)`):
+
+```{r ej1-tabla-re}
+kable(data.frame(`RE probit` = c(rp$coef["educ"], sqrt(rp$vcov["educ", "educ"])), `RE logit` = c(rl$coef["educ"], sqrt(rl$vcov["educ", "educ"])),
+                 row.names = c("coef. educ", "(EE)"), check.names = FALSE), digits = 4)
+```
+
+## (f) Logit de efectos fijos
+
+**Enunciado.** Compute el denominado estimador Logit de efectos fijos para el modelo (5). ¿Se puede computar el efecto de un año más de educación sobre la probabilidad de estar afiliado a un sindicato? Explique.
+
+**Resolución (PDF R) y Solucionario (S):** "El efecto de un año más de educación ... no se puede computar, ya que, en este método no se identifican los coeficientes de los regresores que no varían en el tiempo, como es el caso de la variable *educ* en este ejercicio. Sin embargo, incluso si el coeficiente estuviera identificado ..., sucedería lo de los incisos anteriores de que se debería imponer el valor de $c_i$ ..., ya que no se está asumiendo que se conoce la distribución de $c_i$." (El PDF R no incluye salida de Stata.)
+
+> **⚠️ DISCREPANCIA 5.** Aunque el `.do` corre `xtlogit union educ, fe` y luego `margins, ... predict(pu0)`, el PDF R **no muestra salida**, sólo la explicación teórica; y en la práctica el `margins` con `predict(pu0)` **no es válido** tras un logit de efectos fijos (no existe tal predicción porque los $c_i$ no se estiman) y el `esttab` con `keep(educ)` no encontraría el coeficiente. A continuación se verifica empíricamente la afirmación teórica con el logit condicional.
+
+**Replicación en R:**
+
+```{r ej1-f}
+cl <- clogit(union ~ educ + strata(nr), w)
+coef(cl)                                                         # NA: educ no se identifica (no varia dentro de cada persona)
+c(personas_con_variacion_en_union = sum(tapply(w$union, w$nr, function(z) length(unique(z))) > 1),
+  personas_sin_variacion_descartadas = sum(tapply(w$union, w$nr, function(z) length(unique(z))) == 1))
+```
+
+> La función de verosimilitud condicional sólo usa a las 246 personas cuyo estado sindical cambia en el tiempo y **depende únicamente de regresores que varían dentro de cada persona**; como `educ` es constante dentro de cada persona, su coeficiente no está identificado (`NA`). Se confirma lo que dicen (R) y (S).
+
+## (g) Probit de efectos aleatorios de Chamberlain (pooled)
+
+**Enunciado.** Considere la siguiente extensión del modelo (4): $P(union_{it}=1\mid educ_{it},black_{it},married_{it},c_i)=\Phi(\beta_0+\beta_1educ_{it}+\beta_2black_{it}+\beta_3married_{it}+c_i)$ (6), donde $black_{it}$ y $married_{it}$ son binarias. Asuma la siguiente versión de Mundlak (1978) del supuesto de Chamberlain (1980): $c_i\mid X_i\sim\text{Normal}(\psi+\xi\cdot\overline{married}_i,\sigma_a^2)$ (7). Al asumir sólo (6) y (7) se tiene que $P(union_{it}=1\mid\cdot)=\Phi[\beta_{0,a}+\beta_{1,a}educ_{it}+\beta_{2,a}black_{it}+\beta_{3,a}married_{it}+\xi_a\overline{married}_i]$. Use Pooled Probit para estimar el modelo. Estime el efecto de la escolaridad sobre la probabilidad de estar sindicalizado para una persona afroamericana casada.
+
+**Resultado (PDF R):** `probit union educ black married mean_married, vce(cluster nr)`: N = 4360; Wald $\chi^2(4)$ = 15,55; log pseudo-verosimilitud = −2389,9119; `educ` −0,0031662 (0,0219937); `black` 0,4707704 (0,1297179); `married` 0,0425222 (0,0532229); `mean_married` 0,2052462 (0,1316841); constante −0,8279919 (0,2671794). Efecto marginal de `educ` en `educ` = 11,47692, `black` = 1, `married` = 1, `mean_married` = 0,6923077: −0,0012358 (0,0085842).
+
+**Solucionario (S):** "Se obtiene que para una persona afroamericana y casada un año más de educación reduce la probabilidad de estar afiliado en un sindicato en −0,0012. Sin embargo, el efecto no es estadísticamente significativo." (S agrega la tabla 15.4 de Wooldridge (2010), que resume modelos y métodos de estimación para respuesta binaria con efectos no observados.)
+
+**Replicación en R:**
+
+```{r ej1-g}
+w$mean_married <- ave(w$married, w$nr)                                 # egen mean_married = mean(married), by(nr)
+Xg <- cbind(const = 1, educ = w$educ, black = w$black, married = w$married, mean_married = w$mean_married)
+pg <- bin_fit(w$union, Xg, "probit"); Vg <- bin_robust(pg, w$union, Xg, w$nr)       # vce(cluster nr)
+round(cbind(coef = pg$coef, ee_cluster = sqrt(diag(Vg))), 7)
+
+sub <- w$black == 1 & w$married == 1                                   # persona afroamericana y casada
+pt  <- c(1, mean(w$educ[sub]), 1, 1, mean(w$mean_married[sub]))
+names(pt) <- colnames(Xg); round(pt, 7)
+pe_g <- pe(pg$coef, Vg, Xg, "probit", 2, at = pt); pe_g
+c(ll = pg$ll, dif_coef = dif(pg$coef, c(-.8279919, -.0031662, .4707704, .0425222, .2052462)),
+  dif_ee = dif(sqrt(diag(Vg)), c(.2671794, .0219937, .1297179, .0532229, .1316841)), dif_efecto = dif(pe_g, c(-.0012358, .0085842)))
+```
+
+---
+
+# Ejercicio 2
+
+**Enunciado.** Considere los datos del ejercicio previo para analizar la probabilidad de estar afiliado a un sindicato según la situación de afiliación sindical del año previo.
+
+```{r ej2-datos}
+w$lunion <- ave(w$union, w$nr, FUN = function(z) c(NA, head(z, -1)))   # l.union
+d2 <- w[!is.na(w$lunion), ]                                            # 1981-1987: 3815 obs.
+for (t in 82:87) d2[[paste0("d", t)]] <- as.numeric(d2$year == 1900 + t)
+c(obs = nrow(d2), anios = paste(range(d2$year), collapse = "-"))
+```
+
+## (a) Probit pooled dinámico
+
+**Enunciado.** Use Pooled Probit para estimar $P(union_{it}=1\mid union_{it-1})=\Phi(\psi+\rho\cdot union_{it-1})$ (8). A continuación, obtenga una estimación para $P(union_{it}=1\mid union_{it-1}=1)$ y para $P(union_{it}=1\mid union_{it-1}=0)$. Comente sobre el efecto marginal de estar afiliado a un sindicato en el año $t-1$ en la probabilidad de estar afiliado a un sindicato en el año $t$.
+
+**Resultado (PDF R):** N = 3815; LR $\chi^2(1)$ = 1416,84; log-verosimilitud = −1406,9979; pseudo-$R^2$ = 0,3349; `L1.union` 1,953334 (0,055067); constante −1,348154 (0,0328877). "El efecto marginal de estar afiliado ... es 0,639."
+
+**Solucionario (S):** "La probabilidad de estar afiliado dado que estaba afiliado en el período anterior es 0,727; ... dado que no estaba afiliado es 0,089. Luego, el cambio marginal ... aumento en la probabilidad ... de 0,727 − 0,089 = 0,638."
+
+> **⚠️ DISCREPANCIA 6.** (i) El enunciado pide estimar **las dos probabilidades**; el PDF R sólo reporta su diferencia (0,639), mientras que (S) da las dos (0,727 y 0,089). (ii) Las dos fuentes difieren en el último decimal (0,639 vs. 0,638), por redondeo: la diferencia exacta es 0,6387, que se redondea a 0,639; (S) resta los valores ya redondeados (0,727 − 0,089).
+
+**Replicación en R:**
+
+```{r ej2-a}
+X2a <- cbind(const = 1, lunion = d2$lunion)
+da <- bin_fit(d2$union, X2a, "probit")
+round(rbind(coef = da$coef, ee = sqrt(diag(da$vcov))), 6)
+p1 <- pnorm(da$coef[1] + da$coef[2]); p0 <- pnorm(da$coef[1])
+round(c(`P(union=1 | union_t-1=1)` = unname(p1), `P(union=1 | union_t-1=0)` = unname(p0), diferencia = unname(p1 - p0)), 4)
+c(N = nrow(d2), ll = da$ll, dif_coef = dif(da$coef, c(-1.348154, 1.953334)), dif_ee = dif(sqrt(diag(da$vcov)), c(.0328877, .055067)))
+```
+
+## (b) Con variables binarias temporales
+
+**Enunciado.** Adicione al modelo el conjunto completo de variables binarias temporales. Vuelva a estimar las probabilidades solicitadas para cada año de la muestra.
+
+**Resultado (PDF R):** N = 3815; LR $\chi^2(7)$ = 1432,42; log-verosimilitud = −1399,2079; `L1.union` 1,967931 (0,0554571); `d82` 0,0412915; `d83` −0,0513702; `d84` 0,0046824; `d85` −0,1584597; `d86` −0,1384916; `d87` 0,1744346; constante −1,339921 (0,0712489). Efectos marginales de estar afiliado en $t-1$ sobre la probabilidad en $t$: 1982: 0,651; 1983: 0,636; 1984: 0,646; 1985: 0,614; 1986: 0,618; 1987: 0,667.
+
+**Solucionario (S):** probabilidades dado afiliado / no afiliado: 1982: 0,748 / 0,097; 1983: 0,717 / 0,082; 1984: 0,736 / 0,090; 1985: 0,680 / 0,067; 1986: 0,687 / 0,069; 1987: 0,788 / 0,121.
+
+> **⚠️ DISCREPANCIA 7.** El enunciado pide las probabilidades "para cada año de la muestra". La muestra (con el rezago) cubre **1981–1987** (7 años), pero (R), (S) y el `.do` sólo reportan **1982–1987**: **falta 1981** (el año base, cuya dummy se omite). El `.do` recorre `forvalues t=82(1)87` y por eso nunca calcula el año base. Además, (R) sólo reporta las diferencias y (S) sólo las probabilidades (no las diferencias).
+
+**Replicación en R:**
+
+```{r ej2-b}
+X2b <- cbind(const = 1, lunion = d2$lunion, as.matrix(d2[paste0("d", 82:87)]))
+db  <- bin_fit(d2$union, X2b, "probit")
+round(cbind(coef = db$coef, ee = sqrt(diag(db$vcov))), 6)
+b <- db$coef
+anio <- c(1981, 1982:1987); dummy <- c(0, b[paste0("d", 82:87)])              # 1981 es el año base (d81 omitida)
+tb <- data.frame(anio = anio, `P(1 | afiliado)` = pnorm(b["const"] + b["lunion"] + dummy), `P(1 | no afiliado)` = pnorm(b["const"] + dummy), check.names = FALSE)
+tb$`efecto marginal` <- tb[[2]] - tb[[3]]; rownames(tb) <- NULL
+kable(tb, digits = 3)
+c(N = nrow(d2), ll = db$ll, dif_coef = dif(b, c(-1.339921, 1.967931, .0412915, -.0513702, .0046824, -.1584597, -.1384916, .1744346)),
+  dif_efectos_R = dif(tb$`efecto marginal`[-1], c(.651, .636, .646, .614, .618, .667)),
+  dif_prob_S = dif(as.matrix(tb[-1, 2:3]), cbind(c(.748, .717, .736, .680, .687, .788), c(.097, .082, .090, .067, .069, .121))))
+```
+
+> La fila de 1981 es la que falta en las tres fuentes.
+
+## (c) Probit de efectos aleatorios dinámico (con condición inicial)
+
+**Enunciado.** Estime un modelo de efectos no observables dinámico. Use el modelo Probit de efectos aleatorios incluyendo $union_{i,80}$ como una variable explicativa adicional. Luego, promedie las probabilidades estimadas a lo largo de $union_{i,80}$ para obtener la probabilidad promedio de estar afiliado a un sindicato en el año 1987 dado que estaba afiliado en el período anterior.
+
+**Resultado (PDF R):** N = 3815, 545 grupos × 7 obs.; Wald $\chi^2(8)$ = 335,28; log-verosimilitud = −1293,5235; `L1.union` 0,8886017 (0,0923747); `d82` 0,0398224; `d83` −0,0636919; `d84` −0,0119455; `d85` −0,224562; `d86` −0,2661777; `d87` 0,1277544; `union80` 1,479094 (0,1659071); constante −1,791908 (0,1172376); `/lnsig2u` 0,2114328 (0,1648497); sigma_u = 1,111507; rho = 0,5526622. "La probabilidad promedio de estar afiliado a un sindicato en el año 1987 dado que estaba afiliado en el período anterior es **0,397**."
+
+**Solucionario (S):** "Se nos solicita computar $N^{-1}\sum_i\Phi\left[\frac{(\hat\psi+\hat\rho+\hat\xi\,union_{i,80}+\hat\delta_{87})}{(1+\hat\sigma_a^2)^{1/2}}\right]$ ... igual a 0,397."
+
+**Replicación en R:**
+
+```{r ej2-c}
+# union80 = union de cada persona en 1980 (constante dentro de persona)
+u80 <- tapply(w$union[w$year == 1980], w$nr[w$year == 1980], identity); d2$union80 <- as.numeric(u80[as.character(d2$nr)])
+X2c <- cbind(const = 1, lunion = d2$lunion, as.matrix(d2[paste0("d", 82:87)]), union80 = d2$union80)
+dc  <- re_fit(d2$union, X2c, d2$nr, "probit")
+round(cbind(coef = dc$coef, ee = sqrt(diag(dc$vcov))), 5)
+c(sigma_u = unname(dc$sigma_u), rho = unname(dc$sigma_u^2 / (1 + dc$sigma_u^2)), ll = dc$ll)
+
+# Probabilidad promedio en 1987 dado union_{t-1} = 1: promedio sobre union_{i,80} de Phi(.../sqrt(1 + sigma_u^2))
+b <- dc$coef
+i87 <- d2$year == 1987
+prob87 <- pnorm((b["const"] + b["lunion"] + b["d87"] + b["union80"] * d2$union80[i87]) / sqrt(1 + dc$sigma_u^2))
+c(prob_promedio_1987 = mean(prob87), PDF_R_y_S = 0.397)
+```
+
+> La estimación RE de R difiere ligeramente de la de Stata (DISCREPANCIA 3), pero la probabilidad promedio 0,397 es prácticamente idéntica a la del PDF.
+
+---
+
+# Resumen de discrepancias
+
+| # | Ej. | Tipo | Descripción |
+|---|---|---|---|
+| 1 | 1(c) | Resolución incompleta | El enunciado pide calcular el EE; el `.do` lo programa por método delta pero el PDF R sólo muestra el EE de `margins`. Se replica el cálculo manual (coincide: 0,0037155). |
+| 2 | 1(a) | Menor | Ni (R) ni (S) comentan la necesidad de EE clusterizados con 8 obs. por persona (sí se usan en 1(g)). |
+| 3 | 1(d),(e),2(c) | **Método numérico** | Stata usa cuadratura adaptativa de 12 puntos para RE; sobreestima levemente la log-verosimilitud y mueve los coeficientes en la 2ª–3ª cifra frente al MLE casi exacto (64 nodos) de R. Mismas conclusiones. |
+| 4 | 1(d),(e) | **Resolución/solucionario incompletos** | El efecto en $c_i=0$ (−0,0076 / −0,0059) es sólo una convención; el efecto relevante es el promedio sobre $c_i$ (coeficientes re-escalados por $(1+\sigma_u^2)^{-1/2}$), que no se menciona. En el probit RE ambos coinciden (−0,0076 vs. −0,0078) pero difieren del pooled (−0,0016), dentro de un error estándar. |
+| 5 | 1(f) | Resolución vs. código | El `.do` corre `xtlogit, fe` y `margins ... predict(pu0)` (no válido tras FE logit); el PDF R sólo da la explicación teórica. Verificado con `clogit`: coeficiente de `educ` = NA. |
+| 6 | 2(a) | Resolución incompleta | (R) da sólo la diferencia (0,639), (S) las dos probabilidades (0,727 y 0,089; resta 0,638 por redondeo). |
+| 7 | 2(b) | **Enunciado vs. resolución/código** | Se piden las probabilidades "para cada año de la muestra" (1981–1987) pero (R), (S) y el `.do` reportan sólo 1982–1987; falta el año base 1981. |

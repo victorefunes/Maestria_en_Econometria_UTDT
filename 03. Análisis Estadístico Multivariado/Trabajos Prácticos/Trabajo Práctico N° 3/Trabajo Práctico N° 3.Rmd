@@ -1,0 +1,292 @@
+---
+title: "Trabajo Práctico N° 3"
+subtitle: "Maestría en Econometría UTDT - Análisis Estadístico Multivariado"
+author: "Juan Menduiña"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: false
+    self_contained: true
+    df_print: paged
+lang: es
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.align = "center", fig.width = 8, fig.height = 5)
+options(digits = 7, OutDec = ".")
+
+for (p in c("haven", "readxl")) if (!requireNamespace(p, quietly = TRUE)) install.packages(p)
+library(haven)
+
+# Carpeta con las bases (firmas.dta, govt_bond_returns.xlsx).
+# Se asume que este Rmd está en la carpeta "Trabajo Práctico N° 3".
+datos <- "Datos"
+
+# Formato con coma decimal, como en el informe
+fmt <- function(x, d = 4) format(x, digits = d, decimal.mark = ",")
+tabla <- function(x, d = 4, ...) knitr::kable(x, digits = d, format.args = list(decimal.mark = ","), ...)
+
+azul <- "#1A476F"; rojo <- "#8B2635"
+
+#-------------------------------------------------------------------------------
+# Funciones auxiliares
+#-------------------------------------------------------------------------------
+
+# k-medias con centros iniciales = primeras k observaciones (start(firstk) de Stata)
+kmedias <- function(X, k, robusto = FALSE) {
+  X <- as.matrix(X)
+  if (robusto) {   # inicios aleatorios: se usa cuando las primeras filas no son representativas
+    return(kmeans(X, centers = k, nstart = 25, iter.max = 100)$cluster)
+  }
+  kmeans(X, centers = X[seq_len(k), , drop = FALSE], algorithm = "Lloyd", iter.max = 100)$cluster
+}
+
+# Suma de cuadrados dentro de los grupos, tal como se define en "kmedtest.do":
+# SCDG = sum_g n_g * (suma de las varianzas muestrales de las p variables dentro del grupo g)
+scdg <- function(X, cl) {
+  X <- as.matrix(X)
+  sum(sapply(unique(cl), function(g) {
+    Xg <- X[cl == g, , drop = FALSE]
+    ng <- nrow(Xg)
+    ng * if (ng > 1) sum(apply(Xg, 2, var)) else 0
+  }))
+}
+
+# Test F de reducción de variabilidad: compara k grupos contra k+1 grupos
+kmedtest <- function(X, k, robusto = FALSE) {
+  X <- as.matrix(X)
+  N <- nrow(X); p <- ncol(X)
+  G  <- scdg(X, kmedias(X, k, robusto))
+  G1 <- scdg(X, kmedias(X, k + 1, robusto))
+  est <- (G - G1) / (G / (N - k - 1))
+  pv <- pf(est, p, p * (N - k - 1), lower.tail = FALSE)
+  c(`Grupos` = k, `vs.` = k + 1, `SCDG (k)` = G, `SCDG (k+1)` = G1,
+    `Estadístico` = est, `Valor p` = pv)
+}
+
+tabla_kmedtest <- function(X, ks = 1:5, robusto = FALSE) {
+  out <- t(sapply(ks, function(k) tryCatch(kmedtest(X, k, robusto), error = function(e) rep(NA_real_, 6))))
+  as.data.frame(out, check.names = FALSE)
+}
+
+# Métodos jerárquicos (nombres de Stata -> hclust). Los métodos median, centroid y wards
+# se aplican sobre distancias euclídeas al cuadrado ("L2squared" en Stata).
+metodos <- list(
+  singlelinkage    = list(m = "single",   sq = FALSE),
+  averagelinkage   = list(m = "average",  sq = FALSE),
+  completelinkage  = list(m = "complete", sq = FALSE),
+  waveragelinkage  = list(m = "mcquitty", sq = FALSE),
+  medianlinkage    = list(m = "median",   sq = TRUE),
+  centroidlinkage  = list(m = "centroid", sq = TRUE),
+  wardslinkage     = list(m = "ward.D",   sq = TRUE)
+)
+
+jerarquico <- function(X, nombre) {
+  d <- dist(X)
+  if (metodos[[nombre]]$sq) d <- d^2
+  hclust(d, method = metodos[[nombre]]$m)
+}
+
+dendrograma <- function(hc, nombre, etiquetas, sq) {
+  plot(hc, labels = etiquetas, hang = -1, xlab = "", sub = "", cex = 0.8,
+       ylab = if (sq) "L2squared dissimilarity measure" else "L2 dissimilarity measure",
+       main = paste0("Dendrograma para análisis de clusters con método jerárquico ", nombre))
+}
+```
+
+# Ejercicio 1
+
+*Utilizando la base de datos "firmas.dta", la cual contiene información financiera referida a dos tipos de firmas: 12 firmas consideradas de buena performance y 12 firmas no tan buenas en ese sentido; y dispone de dos características relevadas: EBITASS (ganancias después de impuestos e intereses sobre activos) y ROTC (retorno sobre el capital), se pide:*
+
+Las variables se estandarizan (media 0 y desvío 1) antes de realizar el análisis de clusters, y se descarta la variable `group` (clasificación original), que solo se usa más abajo como referencia.
+
+```{r ej1-datos}
+firmas <- as.data.frame(read_dta(file.path(datos, "firmas.dta")))
+grupo_original <- firmas$group
+vars1 <- c("ebitass", "rotc")
+Z1 <- as.data.frame(scale(firmas[vars1]))
+names(Z1) <- paste0(vars1, "_std")
+str(firmas)
+```
+
+## (a) Realizar un análisis de clusters empleando el algoritmo de las k-medias. Determinar el número de grupos a partir de un test F de reducción de variabilidad.
+
+El test compara la variabilidad dentro de los grupos con $k$ grupos contra la obtenida con $k+1$ grupos. Se agrega un grupo mientras la reducción sea significativa.
+
+```{r ej1-a-test}
+test1 <- tabla_kmedtest(Z1, 1:5)
+tabla(test1, d = 4)
+```
+
+```{r ej1-a-k}
+groups1 <- 2
+```
+
+El número de grupos, a partir de un test F de reducción de variabilidad, es `r groups1`.
+
+> **⚠ Anotación (coincide solo con un nivel de significatividad del 1%):** en la tabla, pasar de 1 a 2 grupos reduce la variabilidad de forma muy significativa (valor p = `r fmt(test1[1, "Valor p"], 2)`), pero pasar de 2 a 3 grupos tiene un valor p de `r fmt(test1[2, "Valor p"], 3)`, que **es significativo al 5%**. Por lo tanto, con un nivel del 5% el test sugeriría agregar al menos un grupo más (incluso el paso de 3 a 4 tiene un valor p de `r fmt(test1[3, "Valor p"], 3)`, y recién el paso de 4 a 5 no es significativo: `r fmt(test1[4, "Valor p"], 3)`). La conclusión de 2 grupos del informe solo se sostiene con un nivel de significatividad del 1% o menos, o si se la fundamenta en la clara separación visual de los dos tipos de firmas (12 y 12 firmas) y en la coincidencia con la clasificación original (23 de 24 firmas bien clasificadas, ver la tabla de abajo). Los valores del estadístico pueden diferir levemente de los de Stata, ya que el algoritmo de k-medias de R y el de Stata no son idénticos.
+
+```{r ej1-a-plot}
+cl1 <- kmedias(Z1, groups1)
+# Se numeran los grupos de menor a mayor media de ROTC estandarizado
+orden <- order(tapply(Z1$rotc_std, cl1, mean))
+cl1 <- match(cl1, orden)
+
+plot(Z1$rotc_std, Z1$ebitass_std, pch = 19, col = c(azul, rojo)[cl1],
+     xlim = c(-2, 2), ylim = c(-2, 2),
+     main = "Análisis de clusters con algoritmo k-medias",
+     xlab = "Standardized values of rotc", ylab = "Standardized values of ebitass")
+legend("bottomright", legend = c("Grupo 1", "Grupo 2"), pch = 19, col = c(azul, rojo))
+table(`Grupo (k-medias)` = cl1, `Clasificación original` = grupo_original)
+```
+
+## (b) Realizar un análisis de conglomerados empleando métodos jerárquicos. Trabajar con distintas medidas de distancias entre clusters, comentando los pros y las contras de cada una de ellas.
+
+```{r ej1-b, fig.height = 4.2}
+hc1 <- lapply(names(metodos), function(m) jerarquico(Z1, m))
+names(hc1) <- names(metodos)
+for (m in names(metodos)) {
+  dendrograma(hc1[[m]], m, firmas$firm, metodos[[m]]$sq)
+}
+```
+
+Altura de la última fusión y composición de los dos grupos que se obtienen al cortar cada dendrograma (grupos = `r groups1`):
+
+```{r ej1-b-resumen}
+cortes1 <- sapply(hc1, cutree, k = groups1)
+altura_final1 <- sapply(hc1, function(h) max(h$height))
+resumen1 <- data.frame(
+  `Altura de la última fusión` = altura_final1,
+  `Tamaño de los grupos` = apply(cortes1, 2, function(g) paste(sort(table(g)), collapse = " / ")),
+  `Coincide con k-medias` = apply(cortes1, 2, function(g) {
+    tab <- table(g, cl1); all(rowSums(tab > 0) == 1)
+  }),
+  check.names = FALSE
+)
+tabla(resumen1, d = 4)
+```
+
+Las alturas de la última fusión coinciden con las de los dendrogramas del PDF. Con todos los métodos se obtiene una partición en grupos de `r paste(sort(table(cortes1[, 1])), collapse = " y ")` firmas, que coincide con la de k-medias salvo en el método de Ward (`r if (all(resumen1[["Coincide con k-medias"]][-7])) "los otros seis métodos coinciden" else "revisar"`), cuyos dos grupos, aunque tienen los mismos tamaños, difieren en la asignación de alguna firma.
+
+**Pros y contras de cada medida de distancia entre clusters.**
+
+- **Single linkage (vecino más cercano):** une los clusters según la mínima distancia entre un par de observaciones. Es simple y capta clusters de formas no elípticas, pero es propenso al efecto de "encadenamiento" (une grupos distintos a través de observaciones intermedias) y sensible al ruido y a los *outliers*.
+- **Complete linkage (vecino más lejano):** usa la máxima distancia entre pares. Genera clusters compactos y de diámetro similar y no encadena, pero es sensible a los *outliers* y tiende a partir clusters grandes.
+- **Average linkage (UPGMA):** usa la distancia promedio entre todos los pares. Es un compromiso entre los dos anteriores y más robusto frente a *outliers*, aunque tiende a formar clusters de varianza similar.
+- **Weighted average linkage (WPGMA):** igual que el anterior, pero pondera por igual a los dos clusters que se fusionan, sin importar su tamaño; así, los clusters pequeños pesan relativamente más.
+- **Median linkage (WPGMC):** usa la distancia entre medianas de los clusters (también ponderando por igual) y debe aplicarse con distancias al cuadrado. Puede generar inversiones en el dendrograma (una fusión posterior a una altura menor).
+- **Centroid linkage (UPGMC):** usa la distancia entre centroides, con distancias al cuadrado. Es intuitivo y robusto a *outliers*, pero puede producir inversiones en el dendrograma.
+- **Ward's linkage:** fusiona los clusters que menos aumentan la suma de cuadrados dentro de los grupos. Suele dar clusters compactos y de tamaño similar y es muy utilizado, pero es sensible a *outliers* y favorece grupos esféricos de tamaños parecidos.
+
+> *Nota: el PDF no incluye texto escrito para este inciso (solo los dendrogramas); la discusión de pros y contras de arriba es una redacción propia y la comparación de resultados surge de la tabla anterior.*
+
+
+# Ejercicio 2
+
+*Utilizar la base de datos iris para realizar un análisis de conglomerados. La base contiene datos de especies de flores de iris con registros de las medidas del sépalo y pétalo de cada una. Originalmente, los datos ya están agrupados por especie, pero, en este ejercicio, se propone utilizar k-means clustering para aplicar el método y ver cómo se compara con las categorías verdaderas. Nota: La base iris ya está precargada en R, por lo que se puede acceder a ella directamente.*
+
+> *Nota: este ejercicio no figura en el do-file de Stata ni tiene respuesta escrita en el PDF; la resolución de abajo es propia.*
+
+```{r ej2-datos}
+data(iris)
+X2 <- iris[, 1:4]
+str(iris)
+```
+
+Número de grupos a partir del test F de reducción de variabilidad (con las variables sin estandarizar, que están todas en centímetros) y de la suma de cuadrados dentro de los grupos:
+
+```{r ej2-test}
+set.seed(123)
+tabla(tabla_kmedtest(X2, 1:5, robusto = TRUE), d = 4)
+```
+
+(Las primeras filas de `iris` pertenecen todas a la especie *setosa*, por lo que usar las primeras $k$ observaciones como centros iniciales, como en el do-file, da malas soluciones; aquí se usan 25 inicios aleatorios.)
+
+```{r ej2-kmeans}
+set.seed(123)
+km2 <- kmeans(X2, centers = 3, nstart = 25)
+tab2 <- table(`Cluster` = km2$cluster, `Especie` = iris$Species)
+tab2
+```
+
+```{r ej2-acuerdo}
+# Cada cluster se asigna a la especie más frecuente en él
+asignacion <- apply(tab2, 1, function(f) colnames(tab2)[which.max(f)])
+acuerdo2 <- sum(apply(tab2, 1, max)) / nrow(iris)
+```
+
+Los clusters se corresponden con las especies de la siguiente forma: `r paste0("cluster ", names(asignacion), " = ", asignacion, collapse = "; ")`. La proporción de flores que quedan en el cluster que corresponde a su especie es `r fmt(100 * acuerdo2, 4)`%: *setosa* queda perfectamente separada, mientras que *versicolor* y *virginica* se superponen parcialmente.
+
+```{r ej2-plot}
+pc <- prcomp(X2, scale. = TRUE)$x[, 1:2]
+plot(pc, col = c(azul, rojo, "darkgreen")[km2$cluster], pch = c(16, 17, 15)[iris$Species],
+     xlab = "Componente principal 1", ylab = "Componente principal 2",
+     main = "k-medias (k = 3): color = cluster, forma = especie")
+legend("topright", legend = levels(iris$Species), pch = c(16, 17, 15), bty = "n")
+```
+
+
+# Ejercicio 3
+
+*El archivo "govt_bond_returns.xlsx" contiene los rendimientos anuales para los inversores (a partir de septiembre de 2010) de bonos del gobierno, enumerados por duración y emisor. Estos retornos están influenciados por las respectivas tasas de inflación y fortalezas de las diversas monedas, así como las percepciones del mercado para estas tasas en el futuro. Realizar un agrupamiento jerárquico (hierarchical clustering) de estos retornos para identificar países con situaciones financieras similares. Comentar cómo el dendrograma agrupa países en regiones geográficas similares.*
+
+```{r ej3-datos}
+bonos <- as.data.frame(readxl::read_excel(file.path(datos, "govt_bond_returns.xlsx")))
+vars3 <- c("mo_1", "mo_3", "mo_6", "mo_8", "yr_1", "yr_3", "yr_5")
+Z3 <- as.data.frame(scale(bonos[vars3]))
+rownames(Z3) <- bonos$Issuer
+bonos
+```
+
+Test F de reducción de variabilidad para el algoritmo de k-medias (con 7 observaciones, solo se evalúan pocos grupos):
+
+```{r ej3-test}
+tabla(tabla_kmedtest(Z3, 1:5), d = 4)
+```
+
+```{r ej3-hc, fig.height = 4.2}
+metodos3 <- setdiff(names(metodos), "medianlinkage")   # el do-file no usa median en este ejercicio
+hc3 <- lapply(metodos3, function(m) jerarquico(Z3, m))
+names(hc3) <- metodos3
+for (m in metodos3) {
+  dendrograma(hc3[[m]], m, bonos$Issuer, metodos[[m]]$sq)
+}
+```
+
+Altura de la última fusión y emisores que se fusionan primero (dos grupos de a pares) con cada método:
+
+```{r ej3-pares}
+altura_final3 <- sapply(hc3, function(h) max(h$height))
+pares <- function(h) {
+  g <- cutree(h, k = nrow(Z3) - 2)             # dos primeras fusiones
+  grupos <- split(bonos$Issuer, g)
+  grupos <- grupos[sapply(grupos, length) > 1]
+  paste(sapply(grupos, paste, collapse = "-"), collapse = " y ")
+}
+tabla(data.frame(`Altura de la última fusión` = altura_final3,
+                 `Primeras fusiones` = sapply(hc3, pares),
+                 check.names = FALSE), d = 4)
+```
+
+```{r ej3-verif}
+par_a <- c("USGovt", "Canada"); par_b <- c("Eurozone", "Switzerland")
+siempre <- all(sapply(hc3, function(h) {
+  g <- cutree(h, k = nrow(Z3) - 2)
+  names(g) <- bonos$Issuer
+  g[par_a[1]] == g[par_a[2]] && g[par_b[1]] == g[par_b[2]] && g[par_a[1]] != g[par_b[1]]
+}))
+siempre
+
+# Emisor que se une en la última fusión (observación individual) con cada método
+ultimo3 <- sapply(hc3, function(h) {
+  m <- h$merge[nrow(h$merge), ]
+  bonos$Issuer[-m[m < 0]]
+})
+ultimo3
+```
+
+Por lo tanto, se puede observar que, cualquiera sea el método jerárquico utilizado, USGovt-Canada y Eurozone-Switzerland son agrupados como regiones geográficas con situaciones financieras similares.
+
+> **✔ Verificación:** la tabla de arriba confirma lo que dice el informe: con los seis métodos las dos primeras fusiones son USGovt-Canada y Eurozone-Switzerland (`r siempre`), y las alturas de la última fusión coinciden con las de los dendrogramas del PDF. Como complemento (no figura en el PDF), el emisor que se une en la última fusión es: `r paste0(names(ultimo3), " = ", ultimo3, collapse = "; ")`; es decir, los emisores más distintos del resto (AustAsia y Japón) se incorporan al final, y más allá de los dos pares mencionados no hay una agrupación geográfica adicional clara. Además, el test F de k-medias del Ejercicio 3 no es concluyente con 7 observaciones (el paso de 1 a 2 grupos tiene un valor p de `r fmt(tabla_kmedtest(Z3, 1:2)[1, "Valor p"], 3)`), y en el do-file se fija igualmente el corte en 2 grupos.

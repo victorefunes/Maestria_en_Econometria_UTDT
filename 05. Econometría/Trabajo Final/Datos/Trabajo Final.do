@@ -2,10 +2,9 @@ clear all
 set more off
 version 17
 
-*local disco="C:/"
-local disco="G:/Mi unidad"
-cd "`disco'/JM/Facultad de Ciencias Económicas (FCE)/Maestría en Econometría/5. Econometría/Trabajo Final/Datos"
-
+local disco="D:/"
+*local disco="G:/Mi unidad"
+cd "`disco'/Box/Maestria_en_Econometria_UTDT/05. Econometría/Trabajo Final/Datos"
 
 capture log close
 log using "Trabajo Final", replace

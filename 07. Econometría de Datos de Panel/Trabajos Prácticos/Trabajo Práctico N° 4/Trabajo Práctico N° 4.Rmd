@@ -1,0 +1,272 @@
+---
+title: "Trabajo Práctico N° 4: Modelos Lineales en Paneles Desbalanceados"
+subtitle: "Econometría de Datos de Panel — Maestría en Economía y Econometría, UTDT"
+author: "Victor Funes"
+date: "2022"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = TRUE, message = FALSE, warning = FALSE)
+library(haven)     # lectura de .dta
+library(plm)       # efectos fijos
+library(sandwich)  # errores estándar clusterizados
+library(lmtest)    # coeftest
+library(knitr)
+
+# Diferencia máxima absoluta entre lo estimado en R y lo reportado en el PDF
+dif <- function(est, pdf) signif(max(abs(unname(est) - pdf)), 3)
+```
+
+> **Cómo leer este documento.** Cada inciso reúne (i) el enunciado de *Trabajo Práctico N° 4 (P).pdf*, (ii) la respuesta del PDF de resolución *Trabajo Práctico N° 4 (R).pdf*, (iii) cuando existe, la respuesta del solucionario *Trabajo Práctico N° 4 (S).pdf* (que sólo resuelve el Ejercicio 1) y (iv) una **replicación en R** (todo el documento usa **sólo R**; el `.do` de Stata sirvió de guía). Los bloques `{r}` se ejecutan al tejer y leen `Datos/keane.dta`.
+> Donde el PDF R sólo dice "Stata." o no muestra salida (incisos 1(b), 1(c), 2(d) y 2(e)), y donde el `.do` no tiene código (2(d) y 2(e)), la replicación en R **completa** el resultado faltante.
+> Las inconsistencias entre enunciado, código, resolución y solucionario están marcadas con **⚠️ DISCREPANCIA**. Al final hay una tabla resumen.
+
+```{r datos}
+k <- as.data.frame(read_dta("Datos/keane.dta"))
+k <- k[order(k$id, k$year), ]                              # equivale a xtset id year
+sel <- k$obswage == 1                                      # observaciones con salario observado
+c(personas = length(unique(k$id)), anios = length(unique(k$year)), obs = nrow(k), con_salario = sum(sel))
+```
+
+---
+
+# Ejercicio 1
+
+**Enunciado.** Utilice la base de datos *"keane.dta"* la cual contiene el historial de empleo y escolaridad de una muestra de hombres para los años 1981 a 1987. Luego, considere la siguiente ecuación de salarios:
+
+$$\ln(wage_{it})=\beta_0+\beta_1 exper_{it}+\beta_2 educ_{it}+c_i+u_{it},\qquad t=1,2,\dots,T \tag{1}$$
+
+donde $\ln(wage_{it})$ es el logaritmo del salario por hora, $exper_{it}$ son los años de experiencia en el mercado laboral y $educ_{it}$ son los años de escolaridad.
+
+> **Nota sobre los datos.** La base es un panel **balanceado** de 1738 hombres × 7 años = 12 166 observaciones; el salario se observa sólo en 5837 de ellas (`obswage = 1`). El carácter *desbalanceado* del título del TP proviene de esa muestra seleccionada (entre 0 y 7 observaciones por persona; 1531 personas con al menos una).
+
+## (a) Efectos fijos y sesgo potencial
+
+**Enunciado.** Estime la ecuación usando efectos fijos. ¿Cuál es el sesgo potencial en este contexto?
+
+**Resultado (PDF R):** N = 5837; 1531 grupos (1–7 obs. por grupo, promedio 3,8); $R^2$ within = 0,2373; `exper` 0,0964067 (0,0027721); `educ` 0,1697764 (0,0243797); constante 7,270616 (0,295975); sigma_u = 0,45083563; sigma_e = 0,31573611; rho = 0,67092951; $F(1530,4304)$ = 5,46.
+
+**Resolución (PDF R) y Solucionario (S)** (texto casi idéntico): "En este contexto de efectos fijos la selección muestral por truncamiento incidental es un problema si la selección está relacionada con los errores idiosincráticos de la ecuación de interés, $u_{it}$. En este sentido, si pensamos que efectivamente lo anterior se cumple y que estamos observando los salarios 'más altos' (los mejores salarios que se ofrecieron) entonces el truncamiento tendría como consecuencia una sobreestimación de los retornos a la educación."
+
+**Replicación en R:**
+
+```{r ej1-a}
+fe <- plm(lwage ~ exper + educ, k[sel, ], index = c("id", "year"), model = "within")
+round(rbind(coef = coef(fe), ee = coef(summary(fe))[, 2]), 7)
+c(N = nobs(fe), grupos = pdim(fe)$nT$n, R2_within = round(summary(fe)$r.squared[1], 4), constante = round(unname(within_intercept(fe)), 6),
+  dif_coef = dif(coef(fe), c(.0964067, .1697764)), dif_ee = dif(coef(summary(fe))[, 2], c(.0027721, .0243797)))
+```
+
+> **Nota.** La estimación FE reproduce exactamente la salida de Stata. Los 207 individuos que nunca tienen salario observado no aportan nada, y los que tienen una sola observación tampoco aportan variación *within*.
+
+## (b) Contraste de selección de Wooldridge (1995) — enfoque de Mundlak
+
+**Enunciado.** Implemente el contraste de sesgo de selección propuesto por Wooldridge (1995) bajo el enfoque de Mundlak (1978).
+
+**Resolución (PDF R):** "Se rechaza la hipótesis nula, por lo que existe evidencia suficiente de que hay sesgo de selección." (sin salida ni estadístico).
+
+**Solucionario (S):** "La hipótesis nula en ambos contrastes de hipótesis establece que la inversa del cociente de Mills estimada no debería ser estadísticamente significativa en nuestro modelo si no hay problemas de selección de la muestra. Sin embargo, en ambos casos encontramos evidencia en favor de rechazar la hipótesis nula."
+
+> **⚠️ DISCREPANCIA 1.** El PDF R no reporta ningún estadístico ni $p$-valor en 1(b) y 1(c): sólo la conclusión. Tampoco el `.do` muestra el resultado (hay que correrlo). A continuación se completan.
+
+> **⚠️ DISCREPANCIA 2 (implementación vs. Wooldridge 1995).** El `.do` estima **un único probit agrupado** (todas las personas y años juntos) y agrega **una sola** razón de Mills inversa $\hat\lambda_{it}$ a la regresión FE, contrastando su coeficiente con un test $t$. El procedimiento de Wooldridge (1995) estima, en cambio, **un probit por cada período** $t$ (de la indicación de selección $s_{it}$ sobre las variables del individuo $\mathbf z_i$), obtiene $\hat\lambda_{it}$ específica de cada período, agrega **las $T$ razones de Mills con coeficientes distintos** a la ecuación en efectos fijos y contrasta **conjuntamente** que los $T$ coeficientes son cero. Abajo se replican las dos versiones: ambas rechazan, de modo que la conclusión no cambia.
+
+**Replicación en R — versión del `.do` (probit agrupado + $\hat\lambda$ única):**
+
+```{r ej1-b}
+k$mean_exper <- ave(k$exper, k$id); k$mean_educ <- ave(k$educ, k$id)         # egen mean(...), by(id)
+pm <- glm(obswage ~ exper + educ + mean_exper + mean_educ, binomial("probit"), k)
+summary(pm)$coefficients
+xb_m <- predict(pm, type = "link"); k$lam_m <- dnorm(xb_m) / pnorm(xb_m)      # inversa del cociente de Mills
+
+G <- length(unique(k$id[sel]))
+vcl <- function(x) vcovHC(x, method = "arellano", type = "HC1", cluster = "group") * G / (G - 1)   # vce(cluster id)
+fe_m <- plm(lwage ~ exper + educ + lam_m, k[sel, ], index = c("id", "year"), model = "within")
+coeftest(fe_m, vcov = vcl)
+```
+
+**Replicación en R — versión de Wooldridge (1995): un probit por año y test conjunto:**
+
+```{r wool-t}
+wool_t <- function(dat, zform) {
+  dat$lam_t <- NA
+  for (t in 81:87) { i <- dat$year == t; pm <- glm(zform, binomial("probit"), dat[i, ]); xb <- predict(pm); dat$lam_t[i] <- dnorm(xb) / pnorm(xb) }
+  s <- dat$obswage == 1; G <- length(unique(dat$id[s]))
+  fe <- plm(lwage ~ exper + educ + factor(year):lam_t, dat[s, ], index = c("id", "year"), model = "within")
+  V <- vcovHC(fe, method = "arellano", type = "HC1", cluster = "group") * G / (G - 1)
+  q <- grep("lam_t", names(coef(fe))); b <- coef(fe)[q]
+  W <- as.numeric(t(b) %*% solve(V[q, q]) %*% b)                  # Wald conjunto: H0: todos los coeficientes de lambda_t = 0
+  list(lambda = b, Wald = W, gl = length(q), p = pchisq(W, length(q), lower.tail = FALSE), exper = coef(fe)["exper"], educ = coef(fe)["educ"])
+}
+wm <- wool_t(k, obswage ~ mean_exper + mean_educ)
+round(wm$lambda, 4); c(Wald = wm$Wald, gl = wm$gl, p_valor = wm$p)
+```
+
+> **Resultado.** Con la versión del `.do` el coeficiente de $\hat\lambda$ es −0,560 ($t=-4{,}51$, $p<0{,}001$); con la de Wooldridge el test conjunto da $\chi^2(7)=39{,}5$ ($p\approx1{,}6\times10^{-6}$). **Se rechaza la hipótesis nula de ausencia de sesgo de selección** en ambos casos, como dicen (R) y (S).
+
+## (c) Contraste de selección de Wooldridge (1995) — enfoque de Chamberlain
+
+**Enunciado.** Implemente el contraste de sesgo de selección propuesto por Wooldridge (1995) bajo el enfoque de Chamberlain (1980).
+
+**Resolución (PDF R):** "Se rechaza la hipótesis nula, por lo que existe evidencia suficiente de que hay sesgo de selección." **Solucionario (S):** ver 1(b).
+
+> **⚠️ DISCREPANCIA 3.** En el enfoque de Chamberlain (1980) la heterogeneidad se aproxima proyectando $c_i$ sobre los regresores de **todos** los períodos ($exper_{i1},\dots,exper_{i7}$, $educ_{i1},\dots,educ_{i7}$). El `.do` sólo usa los valores de **1981 a 1983** (`forvalues t=81(1)83`), es decir 6 de las 14 variables posibles, sin justificarlo en el enunciado ni en las resoluciones. (La ecuación (1) del enunciado tampoco aclara cuántos períodos usar.) Además, las variables `exper81`…`educ83` se construyen con un doble bucle sobre `id` muy ineficiente; en R se obtienen en una línea con `ave()`.
+
+**Replicación en R — versión del `.do` (probit agrupado, regresores de 1981–1983):**
+
+```{r ej1-c}
+for (t in 81:83) for (v in c("exper", "educ"))                              # exper81 ... educ83 (constantes dentro de cada id)
+  k[[paste0(v, t)]] <- ave(ifelse(k$year == t, k[[v]], NA), k$id, FUN = function(z) mean(z, na.rm = TRUE))
+pc <- glm(obswage ~ exper + educ + exper81 + educ81 + exper82 + educ82 + exper83 + educ83, binomial("probit"), k)
+xb_c <- predict(pc, type = "link"); k$lam_c <- dnorm(xb_c) / pnorm(xb_c)
+fe_c <- plm(lwage ~ exper + educ + lam_c, k[sel, ], index = c("id", "year"), model = "within")
+coeftest(fe_c, vcov = vcl)
+```
+
+**Replicación en R — versión de Wooldridge (1995) (un probit por año; $\mathbf z_i$ = valores de 1981–1983):**
+
+```{r wool-c}
+wc <- wool_t(k, obswage ~ exper81 + educ81 + exper82 + educ82 + exper83 + educ83)
+round(wc$lambda, 4); c(Wald = wc$Wald, gl = wc$gl, p_valor = wc$p)
+```
+
+> **Resultado.** Versión del `.do`: coeficiente de $\hat\lambda$ = −0,358 ($t=-4{,}48$, $p<0{,}001$); versión de Wooldridge: $\chi^2(7)=37{,}8$ ($p\approx3{,}3\times10^{-6}$). Nuevamente **se rechaza** la hipótesis nula.
+
+> **Nota sobre el sesgo.** Los retornos a la educación estimados bajo selección corregida son menores que los de FE sin corregir: FE 0,170; POLS-Chamberlain 0,102 y POLS-Mundlak 0,088 (Ejercicio 2), lo que es coherente con la "sobreestimación de los retornos a la educación" que anticipan (R) y (S) en 1(a).
+
+---
+
+# Ejercicio 2
+
+**Enunciado.** Considerando nuevamente la ecuación de salarios del ejercicio previo, realice los siguientes procedimientos: (a) estime el modelo por Wooldridge (1995) bajo el enfoque de Chamberlain (1980); (b) bajo el enfoque de Mundlak (1978); (c) comente sobre los errores estándar de las estimaciones anteriores; (d) estime los errores estándar vía bootstrapping; (e) estime los errores estándar analíticos (varianza asintótica).
+
+**Solucionario (S):** no resuelve el Ejercicio 2.
+
+## (a) Estimación de Wooldridge (1995) — Chamberlain
+
+**Resultado (PDF R) — POLS (Chamberlain):** N = 5837; $R^2$ = 0,2237; `exper` 0,0566567 (0,0130844); `educ` 0,101945 (0,0187839); `exper81` 0,1106423 (0,0330149); `educ81` 0,0986618 (0,0204867); `exper82` −0,0102639 (0,0284707); `educ82` −0,2174353 (0,0366788); `exper83` −0,0704014 (0,0284495); `educ83` 0,0856036 (0,0363551); `year#c.lambda_chamberlain`: 81 −0,2683315, 82 −0,3211014, 83 −0,3500805, 84 −0,3390861, 85 −0,3585597, 86 −0,3195615, 87 −0,3590845; constante 8,87783 (0,1514153).
+
+**Replicación en R:** regresión de POLS sobre la muestra seleccionada con $\hat\lambda$ interactuada con las dummies de año:
+
+```{r ej2-a}
+ols_c <- lm(lwage ~ exper + educ + exper81 + educ81 + exper82 + educ82 + exper83 + educ83 + factor(year):lam_c, k[sel, ])
+round(coef(summary(ols_c)), 6)
+pdf2a <- c(8.87783, .0566567, .101945, .1106423, .0986618, -.0102639, -.2174353, -.0704014, .0856036,
+           -.2683315, -.3211014, -.3500805, -.3390861, -.3585597, -.3195615, -.3590845)
+c(N = nobs(ols_c), R2 = round(summary(ols_c)$r.squared, 4), dif_coef = dif(coef(ols_c), pdf2a),
+  dif_ee_exper_educ = dif(coef(summary(ols_c))[2:3, 2], c(.0130844, .0187839)))
+```
+
+## (b) Estimación de Wooldridge (1995) — Mundlak
+
+**Resultado (PDF R) — POLS (Mundlak):** N = 5837; $R^2$ = 0,2215; `exper` 0,0678465 (0,007649); `educ` 0,0881093 (0,0296264); `mean_exper` −0,0275146 (0,0156551); `mean_educ` −0,0167755 (0,0291599); `year#c.lambda_mundlak`: 81 −0,2756566, 82 −0,3239156, 83 −0,3637717, 84 −0,3154769, 85 −0,3101603, 86 −0,2515261, 87 −0,2525642; constante 8,781247 (0,1284501).
+
+**Replicación en R:**
+
+```{r ej2-b}
+ols_m <- lm(lwage ~ exper + educ + mean_exper + mean_educ + factor(year):lam_m, k[sel, ])
+round(coef(summary(ols_m)), 6)
+pdf2b <- c(8.781247, .0678465, .0881093, -.0275146, -.0167755, -.2756566, -.3239156, -.3637717, -.3154769, -.3101603, -.2515261, -.2525642)
+c(N = nobs(ols_m), R2 = round(summary(ols_m)$r.squared, 4), dif_coef = dif(coef(ols_m), pdf2b),
+  dif_ee_exper_educ = dif(coef(summary(ols_m))[2:3, 2], c(.007649, .0296264)))
+```
+
+**Comparación con FE** (como la tabla del `.do`, `keep(exper educ)`):
+
+```{r ej2-tabla}
+tab <- data.frame(FE = coef(fe), `(EE)` = coef(summary(fe))[, 2],
+                  `POLS Chamberlain` = coef(ols_c)[c("exper", "educ")], `(EE) ` = coef(summary(ols_c))[c("exper", "educ"), 2],
+                  `POLS Mundlak` = coef(ols_m)[c("exper", "educ")], `(EE)  ` = coef(summary(ols_m))[c("exper", "educ"), 2], check.names = FALSE)
+kable(tab, digits = 4)
+```
+
+> Los retornos a la educación caen de 0,170 (FE) a 0,102 (Chamberlain) y 0,088 (Mundlak) una vez que se corrige por selección y se controla por heterogeneidad correlacionada, y los de la experiencia de 0,096 a 0,057 y 0,068. Todos los coeficientes de $\hat\lambda$ interactuados con el año son negativos y significativos.
+
+## (c) Errores estándar de las estimaciones anteriores
+
+**Enunciado.** Comente sobre los errores estándar de las estimaciones anteriores.
+
+**Resolución (PDF R):** "La varianza asintótica de los estimadores de la segunda etapa necesita ser corregida por heterocedasticidad y correlación serial arbitraria, así como, además, por la estimación de la primera etapa."
+
+> **⚠️ DISCREPANCIA 4.** El comentario de (R) es correcto, **pero las salidas de 2(a) y 2(b) del propio PDF (y el `.do`: `regress ...` sin `vce(cluster id)`) usan errores estándar de MCO usuales**, que **no** corrigen ni por heterocedasticidad/correlación serial (varias observaciones por persona) ni por el hecho de que $\hat\lambda$ es un regresor generado. Es decir, los errores estándar reportados en 2(a)–2(b) son exactamente los que (R) dice que no deben usarse. Abajo se comparan con los corregidos.
+
+## (d) Errores estándar vía bootstrap
+
+**Enunciado.** Estime los errores estándar vía bootstrapping.
+
+**Resolución (PDF R):** sólo "Stata." (sin salida). El `.do` tiene el bloque `*INCISO (d)*` **vacío**.
+
+> **⚠️ DISCREPANCIA 5.** Para los incisos 2(d) y 2(e) no hay **ni resultados en el PDF R ni código en el `.do`** (ambos bloques están vacíos; el PDF dice sólo "Stata."). Aquí se programan en R.
+
+**Replicación en R:** bootstrap **por clusters** (se re-muestrean *personas* completas con reposición y se **repiten las dos etapas**: probit y regresión), de modo de capturar tanto la correlación serial dentro de persona como la estimación de la primera etapa.
+
+```{r bootstrap}
+spec <- list(
+  Chamberlain = list(z = obswage ~ exper + educ + exper81 + educ81 + exper82 + educ82 + exper83 + educ83,
+                     x = lwage ~ exper + educ + exper81 + educ81 + exper82 + educ82 + exper83 + educ83),
+  Mundlak     = list(z = obswage ~ exper + educ + mean_exper + mean_educ, x = lwage ~ exper + educ + mean_exper + mean_educ))
+
+two_step <- function(dat, sp, full = FALSE) {                     # etapa 1: probit agrupado; etapa 2: POLS con lambda x año
+  pm <- glm(sp$z, binomial("probit"), dat); xb <- predict(pm); dat$lam <- dnorm(xb) / pnorm(xb)
+  fit <- lm(update(sp$x, . ~ . + factor(year):lam), dat[dat$obswage == 1, ])
+  if (!full) return(coef(fit))
+  list(pm = pm, fit = fit, dat = dat, xb = xb)
+}
+B <- 200; ids <- unique(k$id); byid <- split(k, k$id)
+set.seed(12345)
+boot <- lapply(spec, function(sp) t(replicate(B, { m <- sample(length(ids), replace = TRUE)
+  two_step(do.call(rbind, byid[m]), sp)[c("exper", "educ")] })))
+sapply(boot, function(b) apply(b, 2, sd))                         # errores estandar bootstrap (B = 200)
+```
+
+## (e) Errores estándar analíticos (varianza asintótica)
+
+**Enunciado.** Estime los errores estándar analíticos (varianza asintótica).
+
+**Resolución (PDF R):** sólo "Stata." (sin salida; el `.do` tampoco tiene código).
+
+**Replicación en R:** la segunda etapa es un POLS con regresores $W_{it}=(x_{it},\,d_t\hat\lambda_{it}(\hat\gamma))$ y la primera es un probit con parámetros $\gamma$. Linealizando, $\hat\theta-\theta\approx A^{-1}\sum_i\left[r_i+F\,(\hat\gamma-\gamma)\right]$, con $A=\sum W'W$, $r_i=\sum_t s_{it}W_{it}u_{it}$ (scores de la segunda etapa por persona), $F=\sum s_{it}W_{it}\,\partial u_{it}/\partial\gamma'$ y $\hat\gamma-\gamma\approx V_\gamma\sum_i g_i$ ($g_i$ = score del probit por persona). La varianza es $\hat V=\sum_i\psi_i\psi_i'$ con $\psi_i=A^{-1}(r_i+F V_\gamma g_i)$, que **corrige a la vez por correlación serial/heterocedasticidad (clusters por persona) y por la estimación de la primera etapa**.
+
+```{r analitico}
+analitico <- function(dat, sp) {
+  o <- two_step(dat, sp, TRUE); pm <- o$pm; fit <- o$fit; d <- o$dat; xb <- o$xb
+  s <- d$obswage == 1
+  W <- model.matrix(fit); u <- resid(fit); ids_s <- d$id[s]
+  Z <- model.matrix(pm)                                                     # diseño del probit (todas las obs.)
+  rho <- coef(fit)[paste0("factor(year)", d$year[s], ":lam")]               # coeficientes de lambda por año
+  lam <- d$lam[s]
+  dudg <- (rho * lam * (xb[s] + lam)) * Z[s, , drop = FALSE]                # du/dgamma' (d lambda/d xb = -lambda (xb + lambda))
+  Fm <- crossprod(W, dudg); A <- crossprod(W)
+  ri <- rowsum(W * u, ids_s)                                                # scores de la 2da etapa por persona
+  Phi <- pnorm(xb); phi <- dnorm(xb)
+  gi <- rowsum(((d$obswage - Phi) / (Phi * (1 - Phi)) * phi) * Z, d$id)[rownames(ri), , drop = FALSE]   # scores del probit
+  Ainv <- solve(A); psi <- (ri + gi %*% vcov(pm) %*% t(Fm)) %*% Ainv
+  list(V = crossprod(psi), V_cluster = Ainv %*% crossprod(ri) %*% Ainv, fit = fit)
+}
+an <- lapply(spec, function(sp) analitico(k, sp))
+ee <- function(nm) rbind(`MCO usual (PDF R)` = coef(summary(an[[nm]]$fit))[c("exper", "educ"), 2],
+                         `cluster, sin corregir 1a etapa` = sqrt(diag(an[[nm]]$V_cluster))[c("exper", "educ")],
+                         `analítico (corrige 1a etapa)` = sqrt(diag(an[[nm]]$V))[c("exper", "educ")],
+                         `bootstrap (B = 200)` = apply(boot[[nm]], 2, sd))
+cat("Chamberlain\n"); kable(ee("Chamberlain"), digits = 5)
+cat("Mundlak\n");     kable(ee("Mundlak"), digits = 5)
+```
+
+> **Comentario (completa 2(c)).** Los errores estándar usuales de MCO **subestiman** la incertidumbre: al clusterizar por persona suben alrededor de 10–50 % (p. ej. `educ` en Mundlak: 0,030 → 0,045) y al corregir además por la estimación de $\hat\lambda$ suben apenas más (0,0456); el bootstrap por clusters, que también incorpora la variabilidad de la primera etapa sin supuestos de aproximación, da errores estándar algo mayores (0,051 para `educ` en Mundlak; 0,026 en Chamberlain). Por lo tanto la corrección por correlación serial dentro de persona es lo que más importa; la corrección por el regresor generado es de segundo orden, pero hace que los estimadores analítico y bootstrap sean los más confiables. Con cualquiera de ellos, `exper` y `educ` siguen siendo significativos.
+
+---
+
+# Resumen de discrepancias
+
+| # | Ej. | Tipo | Descripción |
+|---|---|---|---|
+| 1 | 1(b),(c) | Resolución incompleta | El PDF R sólo dice "se rechaza la hipótesis nula", sin estadístico ni $p$-valor. Se completan: $t=-4{,}51$ (Mundlak) y $t=-4{,}48$ (Chamberlain); en la versión de Wooldridge, $\chi^2(7)=39{,}5$ y $37{,}8$. |
+| 2 | 1(b),(c) | **Código vs. Wooldridge (1995)** | El `.do` usa un probit agrupado y una sola $\hat\lambda$; Wooldridge (1995) propone un probit por período y un test conjunto de las $T$ razones de Mills. Ambas versiones rechazan. |
+| 3 | 1(c) | **Código** | Chamberlain usa sólo 1981–1983 (6 variables) en lugar de los 7 períodos disponibles; no se justifica. |
+| 4 | 2(a),(b),(c) | **Resolución vs. su propio comentario** | (R) dice que hay que corregir por correlación serial y por la primera etapa, pero sus salidas de 2(a)–2(b) (y el `.do`) usan EE usuales de MCO. |
+| 5 | 2(d),(e) | **Resolución incompleta / código vacío** | El PDF R sólo dice "Stata." y el `.do` tiene los bloques `INCISO (d)` e `INCISO (e)` vacíos. Se programan en R (bootstrap por clusters y varianza analítica). |

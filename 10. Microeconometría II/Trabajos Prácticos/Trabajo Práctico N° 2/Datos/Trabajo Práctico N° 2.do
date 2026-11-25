@@ -1,10 +1,9 @@
 clear all
 set more off
 
-*local disco="C:/"
-local disco="G:/Mi unidad"
-cd "`disco'/JM/Facultad de Ciencias Económicas (FCE)/Maestría en Econometría/10. Microeconometría II/Trabajos Prácticos/Trabajo Práctico N° 2/Datos"
-
+*local disco="D:/"
+*local disco="G:/Mi unidad"
+cd "D:/Box/Maestria_en_Econometria_UTDT/10. Microeconometría II/Trabajos Prácticos/Trabajo Práctico N° 2/Datos"
 
 /*
 findit install nnmatch

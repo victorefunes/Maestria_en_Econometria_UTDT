@@ -1,0 +1,473 @@
+---
+title: "Trabajo Práctico N° 2"
+subtitle: "Maestría en Econometría UTDT - Análisis Estadístico Multivariado"
+author: "Juan Menduiña"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: false
+    self_contained: true
+    df_print: paged
+lang: es
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.align = "center", fig.width = 8, fig.height = 5.5)
+options(digits = 7, OutDec = ".")
+
+if (!requireNamespace("haven", quietly = TRUE)) install.packages("haven")
+library(haven)
+
+# Carpeta con las bases (ine.dta, renta.csv, wb.dta, hspendusa2009.csv).
+# Se asume que este Rmd está en la carpeta "Trabajo Práctico N° 2".
+datos <- "Datos"
+
+# Formato con coma decimal, como en el informe
+fmt <- function(x, d = 4) format(x, digits = d, decimal.mark = ",")
+tabla <- function(x, d = 4, ...) knitr::kable(x, digits = d, format.args = list(decimal.mark = ","), ...)
+# Para matrices con valores de órdenes de magnitud muy distintos
+tabla_cient <- function(x, d = 4, ...) {
+  knitr::kable(apply(x, 2, function(c) format(c, digits = d, decimal.mark = ",")), ...)
+}
+
+azul <- "#1A476F"
+
+#-------------------------------------------------------------------------------
+# Funciones auxiliares (equivalentes a comandos de Stata)
+#-------------------------------------------------------------------------------
+
+# summarize
+resumen <- function(df) {
+  t(sapply(df, function(x) c(Obs = sum(!is.na(x)), Media = mean(x), `Desv. est.` = sd(x),
+                             Mín = min(x), Máx = max(x))))
+}
+
+# tabstat, statistics(mean variance cv)
+tabstat_mvc <- function(df) {
+  t(sapply(df, function(x) c(Media = mean(x), Varianza = var(x), CV = sd(x) / mean(x))))
+}
+
+# pcorr: correlación parcial y semiparcial de la 1ra variable con cada una de las restantes
+pcorr <- function(df) {
+  # Las correlaciones parcial y semiparcial no dependen de la escala de las variables;
+  # se calculan con las variables estandarizadas para evitar problemas numéricos
+  df <- as.data.frame(scale(df))
+  S <- cov(df)
+  y <- 1
+  xs <- 2:ncol(df)
+  P <- solve(S)
+  Rp <- -P / sqrt(outer(diag(P), diag(P)))
+  Pxx <- solve(S[xs, xs, drop = FALSE])
+  beta <- solve(S[xs, xs, drop = FALSE], S[xs, y])
+  semi <- beta * sqrt(1 / diag(Pxx)) / sqrt(S[y, y])
+  pval <- summary(lm(df[[1]] ~ ., data = df[xs]))$coefficients[-1, 4]
+  out <- data.frame(Parcial = Rp[y, xs], Semiparcial = semi,
+                    Parcial2 = Rp[y, xs]^2, Semiparcial2 = semi^2,
+                    p_valor = unname(pval))
+  names(out) <- c("Corr. parcial", "Corr. semiparcial", "Corr. parcial^2",
+                  "Corr. semiparcial^2", "Valor p")
+  rownames(out) <- colnames(df)[xs]
+  out
+}
+
+# Análisis descriptivo completo
+descriptivo <- function(X) {
+  cat("\n**Resumen:**\n\n")
+  print(tabla(resumen(X), d = 4))
+  cat("\n\n**Media, varianza y coeficiente de variación:**\n\n")
+  print(tabla(t(tabstat_mvc(X)), d = 5))
+  cat("\n\n**Matriz de correlaciones:**\n\n")
+  print(tabla(cor(X), d = 4))
+  cat("\n\n**Matriz de varianzas y covarianzas:**\n\n")
+  print(tabla_cient(cov(X), d = 5))
+  cat("\n\n**Correlaciones parcial y semiparcial de", colnames(X)[1], "con las demás variables:**\n\n")
+  print(tabla(pcorr(X), d = 4))
+}
+
+# Componentes principales sobre la matriz de correlaciones.
+# 'ref' fija el signo de los primeros componentes (el signo de un autovector es arbitrario):
+# el componente k se orienta de modo que la variable ref[k] tenga carga positiva.
+pca_corr <- function(X, ref) {
+  e <- eigen(cor(X), symmetric = TRUE)
+  V <- e$vectors
+  for (k in seq_along(ref)) if (V[ref[k], k] < 0) V[, k] <- -V[, k]
+  dimnames(V) <- list(colnames(X), paste0("Comp", seq_len(ncol(X))))
+  list(ev = e$values, V = V)
+}
+
+# Componentes principales sobre la matriz de covarianzas
+pca_cov <- function(X) {
+  e <- eigen(cov(X), symmetric = TRUE)
+  V <- e$vectors
+  for (k in seq_len(ncol(V))) if (sum(V[, k]) < 0) V[, k] <- -V[, k]
+  dimnames(V) <- list(colnames(X), paste0("Comp", seq_len(ncol(X))))
+  list(ev = e$values, V = V)
+}
+
+# Tabla de autovalores estilo "pca" de Stata
+tabla_pca <- function(ev) {
+  data.frame(Autovalor = ev,
+             Diferencia = c(-diff(ev), NA),
+             Proporción = ev / sum(ev),
+             Acumulada = cumsum(ev / sum(ev)),
+             row.names = paste0("Comp", seq_along(ev)))
+}
+
+# Varianza de cada variable no explicada por los primeros k componentes (PCA de correlaciones)
+sin_explicar <- function(pc, k) {
+  1 - rowSums(sweep(pc$V[, 1:k, drop = FALSE]^2, 2, pc$ev[1:k], "*"))
+}
+
+# Scores de los componentes (variables estandarizadas por autovectores)
+scores_pca <- function(X, pc) scale(as.matrix(X)) %*% pc$V
+
+# Scree plot
+screeplot_r <- function(ev) {
+  plot(seq_along(ev), ev, type = "b", pch = 19, col = azul,
+       main = "PCA\n(basado en matriz de correlaciones)",
+       xlab = "Componente", ylab = "Autovalor", ylim = c(0, max(ev) * 1.1))
+  abline(h = 1, col = "red")
+}
+
+# Gráficos de barras de varianza explicada (individual y acumulada)
+barras_prop <- function(ev, umbral = 0.8) {
+  prop <- ev / sum(ev)
+  prop_acum <- cumsum(prop)
+  for (i in 1:2) {
+    y <- if (i == 1) prop else prop_acum
+    titulo <- if (i == 1) "Porcentaje de varianza explicada por cada componente" else
+      "Porcentaje acumulado de varianza explicada por cada componente"
+    ymax <- if (i == 1) max(y) * 1.15 else 1.08
+    b <- barplot(y, names.arg = seq_along(y), ylim = c(0, ymax), yaxt = "n", space = 0.4,
+                 col = azul, xlab = "Componente",
+                 main = paste0(titulo, "\n(basado en matriz de correlaciones)"))
+    marcas <- seq(0.1, min(ymax, 1), 0.1)
+    axis(2, at = marcas, labels = paste0(round(marcas * 100), "%"), las = 1)
+    text(b, y, labels = formatC(y, digits = 3, format = "g"), pos = 3, cex = 0.8)
+    if (i == 2) abline(h = umbral, col = "red")
+  }
+}
+
+# Scatterplot de los dos primeros componentes
+scatter_pca <- function(scores, etiquetas, cex_lab = 0.6) {
+  xr <- range(scores[, 1]); xr <- xr + c(-1, 1) * diff(xr) * 0.05
+  plot(scores[, 1], scores[, 2], pch = 19, col = azul, cex = 0.8, xlim = xr,
+       main = "Scatterplot\n(basado en matriz de correlaciones)",
+       xlab = "Componente 1", ylab = "Componente 2")
+  abline(h = 0, v = 0, col = "red")
+  text(scores[, 1], scores[, 2], labels = etiquetas, pos = 4, cex = cex_lab, col = azul, xpd = NA)
+}
+
+# Biplot (equivalente a "biplot, std alpha(c)" de Stata) a partir del PCA de correlaciones.
+# Observaciones: U D^c;  variables: V D^(1-c), con D = sqrt((n-1) * autovalor).
+biplot_r <- function(X, pc, c, dx = 1, dy = 2, etiquetas, cex_obs = 0.45) {
+  n <- nrow(X)
+  D <- sqrt((n - 1) * pc$ev)
+  S <- scores_pca(X, pc)
+  filas <- cbind(S[, dx] / D[dx]^(1 - c), S[, dy] / D[dy]^(1 - c))
+  cols <- cbind(pc$V[, dx] * D[dx]^(1 - c), pc$V[, dy] * D[dy]^(1 - c))
+  rx <- range(c(filas[, 1], cols[, 1], 0)); ry <- range(c(filas[, 2], cols[, 2], 0))
+  rx <- rx + c(-1, 1) * diff(rx) * 0.08; ry <- ry + c(-1, 1) * diff(ry) * 0.08
+  plot(filas, pch = 19, col = azul, cex = 0.5, xlim = rx, ylim = ry, asp = 1,
+       xlab = paste("Dimensión", dx), ylab = paste("Dimensión", dy),
+       main = paste0("Biplot (c = ", format(c, decimal.mark = ","), ")\n(basado en matriz de correlaciones)"))
+  abline(h = 0, v = 0, col = "red")
+  text(filas, labels = etiquetas, pos = 4, cex = cex_obs, col = azul, xpd = NA)
+  arrows(0, 0, cols[, 1], cols[, 2], col = "darkgreen", length = 0.08)
+  text(cols * 1.06, labels = colnames(X), col = "darkgreen", cex = 0.7, xpd = NA)
+  legend("bottomright", legend = c("Variables", "Observaciones"), pch = c(NA, 19),
+         lty = c(1, NA), col = c("darkgreen", azul), cex = 0.7, bty = "n")
+}
+```
+
+# Ejercicio 1
+
+*El archivo "ine.dta" es una base de datos que contiene los gastos promedio, en euros, de los hogares españoles, por grandes rubros y comunidad autónoma, correspondientes a los relevamientos de la encuesta de presupuestos familiares del año 2005 realizada por el Instituto Nacional de Estadísticas de España (INE). La descripción de las variables y de la base puede consultarse en las etiquetas asociadas a cada una.*
+
+```{r ej1-datos}
+ine <- as.data.frame(read_dta(file.path(datos, "ine.dta")))
+vars1 <- c("alybnh", "vestcal", "vivagelo", "mobymant", "salud", "transp",
+           "comu", "ocio", "educ", "esparc", "otros")
+X1 <- ine[vars1]
+cols1 <- length(vars1)
+# Etiquetas de las variables
+sapply(ine[vars1], function(x) attr(x, "label"))
+```
+
+## (a) Realizar un análisis descriptivo de los datos.
+
+```{r ej1-a, results='asis'}
+descriptivo(X1)
+```
+
+## (b) Realizar un análisis de componentes principales.
+
+**Basado en matriz de correlaciones:**
+
+```{r ej1-b-cor}
+pc1 <- pca_corr(X1, ref = c(1, 1, 1))   # alybnh con carga positiva en los 3 primeros
+tabla(tabla_pca(pc1$ev), d = 4)
+tabla(pc1$V, d = 4)
+```
+
+**Basado en matriz de varianzas y covarianzas:**
+
+```{r ej1-b-cov}
+pc1_cov <- pca_cov(X1)
+tabla_cient(as.matrix(tabla_pca(pc1_cov$ev)), d = 4)
+tabla(pc1_cov$V, d = 4)
+```
+
+## (c) Efectuar la selección de los componentes principales de acuerdo con los siguientes modos:
+
+### (i) Búsqueda del "codo".
+
+```{r ej1-c-i}
+screeplot_r(pc1$ev)
+```
+
+Mediante este modo, se seleccionarían los tres primeros componentes principales.
+
+### (ii) Búsqueda por umbral de varianza a explicar, considerando un 80%.
+
+```{r ej1-c-ii, fig.height = 4.5}
+barras_prop(pc1$ev, umbral = 0.8)
+```
+
+Mediante este modo, se seleccionarían los tres primeros componentes principales (que explican, en conjunto, `r fmt(100 * sum(pc1$ev[1:3]) / sum(pc1$ev), 4)`% de la varianza).
+
+### (iii) Búsqueda por tope mínimo al valor de los eigenvalores, considerando la varianza media.
+
+```{r ej1-c-iii}
+varianza_media1 <- mean(pc1$ev)
+varianza_media1
+which(pc1$ev > varianza_media1)
+```
+
+Mediante este modo, se seleccionarían los tres primeros componentes principales, ya que estos tienen un autovalor mayor a 1, correspondiente a la varianza media.
+
+## (d) Interpretar los componentes seleccionados. Para ello, se puede emplear el archivo "renta.csv". Aclaración: El archivo "renta.csv" contiene información referida al ingreso promedio por hogar, por comunidad; relevado por el INE para el año 2005.
+
+Componentes retenidos (tres primeros) y varianza no explicada de cada variable:
+
+```{r ej1-d}
+tabla(cbind(pc1$V[, 1:3], `No explicada` = sin_explicar(pc1, 3)), d = 4)
+```
+
+El primer autovector pondera con signo positivo a todas las variables, por lo que el primer componente puede ser interpretado como una medida global de gasto.
+
+El segundo autovector pondera con un signo positivo a la primera, segunda y quinta variable y con signo negativo a las restantes, por lo que el segundo componente tomará valores altos en aquellas comunidades cuyos gastos de necesidad primaria (alimentos y bebidas no alcohólicas, artículos de vestir y calzado, y salud) resulten más importantes, en términos relativos, a los restantes.
+
+El tercer autovector pondera con un signo negativo a la segunda, tercera, octava, novena y décima variable y con signo positivo a las restantes, por lo que el tercer componente tomará valores altos en aquellas comunidades cuyos gastos en transporte, en comunicaciones y otros resulten más importantes, en términos relativos, a los restantes.
+
+Como apoyo, se pueden relacionar los componentes con el ingreso medio por hogar de cada comunidad (`renta.csv`):
+
+```{r ej1-d-renta}
+renta <- read.csv2(file.path(datos, "renta.csv"), fileEncoding = "latin1",
+                   strip.white = TRUE, stringsAsFactors = FALSE)
+names(renta) <- trimws(names(renta))
+renta$comunidad <- trimws(renta$comunidad)
+idx <- match(trimws(ine$comunidad), renta$comunidad)
+stopifnot(!anyNA(idx))   # todas las comunidades se emparejan por nombre
+imedhog <- renta$imedhog[idx]
+
+sc1 <- scores_pca(X1, pc1)[, 1:3]
+tabla(data.frame(Componente = paste0("Comp", 1:3),
+                 `Correlación con la renta media` = as.vector(cor(sc1, imedhog)),
+                 check.names = FALSE), d = 4)
+```
+
+
+# Ejercicio 2
+
+*En relación al ejercicio anterior, realizar el biplot asociado a las dos dimensiones principales, considerando un parámetro c = 0,5.*
+
+```{r ej2, fig.height = 7, fig.width = 8.5}
+biplot_r(X1, pc1, c = 0.5, dx = 1, dy = 2, etiquetas = ine$comunidad)
+```
+
+
+# Ejercicio 3
+
+*Teniendo en cuenta la misma base de datos del primer punto, efectuar los biplots correspondientes a las dos dimensiones principales y a la primera y tercera, considerando, en ambos casos, un parámetro c = 0. Comentar, brevemente, el resultado en relación a lo obtenido mediante el análisis de componentes principales efectuado en el primer ejercicio.*
+
+```{r ej3-a, fig.height = 7, fig.width = 8.5}
+biplot_r(X1, pc1, c = 0, dx = 1, dy = 2, etiquetas = ine$comunidad)
+```
+
+```{r ej3-b, fig.height = 7, fig.width = 8.5}
+biplot_r(X1, pc1, c = 0, dx = 1, dy = 3, etiquetas = ine$comunidad)
+```
+
+**Comentario.** Con c = 0, las variables se representan con $V D$ y las observaciones con $U$: la longitud de cada flecha aproxima la desviación estándar de la variable estandarizada y el ángulo entre dos flechas aproxima su correlación, mientras que las comunidades se ubican cerca del origen y su posición relativa refleja los valores de los componentes. El resultado es coherente con el análisis de componentes principales del Ejercicio 1:
+
+- Sobre la dimensión 1, casi todas las flechas apuntan hacia la derecha, de modo que esta dimensión es una medida global de gasto: las comunidades hacia la derecha son las de mayor gasto general.
+- En el plano de las dimensiones 1 y 2, las variables de necesidad primaria (`alybnh`, `vestcal` y `salud`) apuntan hacia arriba, y `vivagelo`, `educ` y `ocio`, hacia abajo, que es el contraste que se había identificado para el segundo componente.
+- En el plano de las dimensiones 1 y 3, `transp` apunta marcadamente hacia arriba (con `otros` y `comu` en menor medida), que es lo que caracteriza al tercer componente.
+
+
+# Ejercicio 4
+
+*La base "wb.dta" contiene información relevada por el Banco Mundial en 77 países durante el año 2007 (los detalles de las variables relevadas se pueden observar en las etiquetas asignadas a las mismas). A partir de estos datos, se pide:*
+
+```{r ej4-datos}
+wb <- as.data.frame(read_dta(file.path(datos, "wb.dta")))
+vars4 <- paste0("var", 4:12)
+X4 <- wb[vars4]
+cols4 <- length(vars4)
+data.frame(variable = vars4, etiqueta = sapply(wb[vars4], function(x) attr(x, "label")))
+```
+
+## (a) Realizar un análisis normado de componentes principales a partir de los datos.
+
+```{r ej4-a-desc, results='asis'}
+descriptivo(X4)
+```
+
+**Basado en matriz de correlaciones:**
+
+```{r ej4-a-cor}
+pc4 <- pca_corr(X4, ref = c(2, 6, 1))   # var5, var9 y var4 con carga positiva en los 3 primeros
+tabla(tabla_pca(pc4$ev), d = 4)
+tabla(pc4$V, d = 4)
+```
+
+**Basado en matriz de varianzas y covarianzas:**
+
+```{r ej4-a-cov}
+pc4_cov <- pca_cov(X4)
+tabla_cient(as.matrix(tabla_pca(pc4_cov$ev)), d = 4)
+tabla(pc4_cov$V, d = 4)
+```
+
+> **⚠ Anotación (diferencia de salida respecto del PDF):** la tabla de Stata del PDF muestra solo 4 componentes con autovalor distinto de cero en el análisis sobre covarianzas (los componentes 5 a 9 figuran como 0). En R se calculan los 9 autovalores: los componentes 5 a 9 no son exactamente cero, pero en conjunto representan apenas `r fmt(100 * sum(pc4_cov$ev[5:9]) / sum(pc4_cov$ev), 3)`% de la varianza total, por lo que la conclusión es la misma.
+
+Como las variables están medidas en unidades muy distintas (población y fuerza laboral en millones de personas frente a tasas porcentuales), el análisis sobre la matriz de covarianzas queda dominado por las variables de mayor escala (`var8`, `var11`, `var10` y `var5`); por eso se trabaja con la matriz de correlaciones.
+
+## (b) ¿Cuántos componentes se sugiere extraer?
+
+```{r ej4-b-scree}
+screeplot_r(pc4$ev)
+```
+
+```{r ej4-b-barras, fig.height = 4.5}
+barras_prop(pc4$ev, umbral = 0.8)
+```
+
+Por lo tanto, se sugiere extraer los tres primeros componentes principales: el "codo" aparece en el tercer componente y, con los dos primeros, se explica `r fmt(100 * sum(pc4$ev[1:2]) / sum(pc4$ev), 4)`% de la varianza, por lo que el tercer componente es necesario para superar el umbral del 80%.
+
+## (c) ¿Cuál es el porcentaje de variabilidad total explicado por las componentes seleccionadas?
+
+```{r ej4-c}
+pct4 <- 100 * sum(pc4$ev[1:3]) / sum(pc4$ev)
+```
+
+El porcentaje de variabilidad total explicado por las componentes seleccionadas es `r fmt(pct4, 4)`%.
+
+## (d) ¿Qué interpretación se sugiere de las componentes, con arreglo a las correlaciones existentes con las variables originales? Para este punto, se puede ayudar con la estructura de análisis presente en el libro "P2.xlsx".
+
+Correlaciones entre cada componente y las variables originales (cargas por la raíz del autovalor):
+
+```{r ej4-d}
+cor_comp4 <- sweep(pc4$V[, 1:3], 2, sqrt(pc4$ev[1:3]), "*")
+tabla(cbind(`Etiqueta` = sapply(wb[vars4], function(x) attr(x, "label")),
+            as.data.frame(round(cor_comp4, 4))), d = 4)
+```
+
+El primer autovector pondera con signo positivo a todas las variables excepto a "Real Interest Rate", "Life Expectancy at Birth" y "MFN Tariff Rate", por lo que el primer componente principal tomará valores bajos en aquellos países cuyos valores en estas variables resulten más importantes, en términos relativos, a los restantes.
+
+> **⚠ Anotación (no coincide con la tabla calculada):** en el primer componente, las variables con carga negativa son "Real Interest Rate" (`r fmt(cor_comp4["var6", 1], 3)`), "Fertility Rate" (`r fmt(cor_comp4["var9", 1], 3)`) y "MFN Tariff Rate" (`r fmt(cor_comp4["var12", 1], 3)`). "Life Expectancy at Birth" tiene, en cambio, carga **positiva** (`r fmt(cor_comp4["var7", 1], 3)`; en el PDF, 0,1984 en el autovector). El texto del informe parece haber confundido "Life Expectancy at Birth" con "Fertility Rate". Además, las cargas más altas del componente (alrededor de 0,89-0,90) son las de "Land under cereal production", "Population", "Internet Users" y "Labor Force", lo que sugiere interpretarlo como un componente de tamaño, y no tanto de nivel de ingreso (la correlación con "GNI per capita" es solo `r fmt(cor_comp4["var4", 1], 3)`).
+
+El segundo autovector pondera con signo positivo a todas las variables excepto a "GNI per cápita" y "Life Expectancy at Birth", por lo que el segundo componente principal tomará valores bajos en aquellos países cuyos valores en estas variables resulten más importantes, en términos relativos, a los restantes.
+
+El tercer autovector pondera con signo positivo a todas las variables excepto a "Population", "Labor Force" y "MFN Tariff Rate", por lo que el tercer componente principal tomará valores bajos en aquellos países cuyos valores en estas variables resulten más importantes, en términos relativos, a los restantes.
+
+> **⚠ Anotación (coincide en lo esencial, con una omisión):** además de "Population" (`r fmt(cor_comp4["var8", 3], 3)`), "Labor Force" (`r fmt(cor_comp4["var11", 3], 3)`) y "MFN Tariff Rate" (`r fmt(cor_comp4["var12", 3], 3)`), "Land under cereal production" también tiene carga negativa en el tercer componente (`r fmt(cor_comp4["var5", 3], 3)`; −0,0045 en el autovector), aunque es prácticamente nula. Las cargas dominantes del componente son las de "Real Interest Rate" (`r fmt(cor_comp4["var6", 3], 3)`) y, en menor medida, "GNI per capita" (`r fmt(cor_comp4["var4", 3], 3)`), por lo que el componente se interpreta sobre todo como un contraste centrado en la tasa de interés real. Sobre el segundo componente, en cambio, el texto del informe coincide con la tabla.
+
+## (e) Clasificar a los países de acuerdo con las dos componentes principales.
+
+```{r ej4-e, fig.height = 6.5}
+sc4 <- scores_pca(X4, pc4)
+scatter_pca(sc4, wb$var1, cex_lab = 0.55)
+```
+
+## (f) Realice un biplot considerando las dos dimensiones principales de análisis para un parámetro c = 0.5. ¿Qué se puede decir sobre la posición de los Estados Unidos y China y su influencia en el análisis, a la luz de los resultados obtenidos?
+
+```{r ej4-f, fig.height = 7, fig.width = 8.5}
+biplot_r(X4, pc4, c = 0.5, dx = 1, dy = 2, etiquetas = wb$var1, cex_obs = 0.4)
+```
+
+A la luz de los resultados obtenidos, lo que se puede decir sobre la posición de los Estados Unidos y China es que ambos tienen, respecto al resto de los países, un alto valor del componente 1 y China, además, del componente 2, reflejando, por ejemplo, en el primer caso, el alto nivel de GNI per cápita y, en el segundo caso, el alto nivel de población.
+
+```{r ej4-f-anot, include=FALSE}
+pos_us_gni <- rank(-wb$var4)[wb$var1 == "United States"]
+pos_us_pob <- rank(-wb$var8)[wb$var1 == "United States"]
+pos_cn_pob <- rank(-wb$var8)[wb$var1 == "China"]
+```
+
+> **⚠ Anotación (coincide solo en parte):** la posición de ambos países en el primer componente se explica sobre todo por su tamaño (superficie cultivada de cereales, población, usuarios de Internet y fuerza laboral, con correlaciones de alrededor de 0,89-0,90 con el componente), y no por el ingreso: el componente tiene una correlación de solo `r fmt(cor_comp4["var4", 1], 3)` con "GNI per capita". Estados Unidos sí tiene un GNI per cápita alto (puesto `r pos_us_gni` de `r nrow(wb)` países), de modo que el informe no se equivoca al mencionarlo, pero esa variable contribuye poco al componente 1; el alto valor de Estados Unidos es más consistente con su magnitud en población (puesto `r pos_us_pob`), fuerza laboral y usuarios de Internet, y la mención al GNI per cápita debería presentarse como un factor secundario. En el caso de China, el texto del informe es razonable para el componente 1 (población: puesto `r pos_cn_pob`), pero para el componente 2 la población tiene una correlación de solo `r fmt(cor_comp4["var8", 2], 3)`; ahí pesan más las cargas de "Life Expectancy at Birth" (`r fmt(cor_comp4["var7", 2], 3)`), "Fertility Rate" (`r fmt(cor_comp4["var9", 2], 3)`) y "GNI per capita" (`r fmt(cor_comp4["var4", 2], 3)`), de modo que atribuir su posición en ese componente solo a la población resulta incompleto.
+
+
+# Ejercicio 5
+
+*La base "hspendusa2009.csv" contiene información relevada durante los años 2008-2009 por el Instituto de Estadísticas de los Estados Unidos, correspondiente a los gastos medios de los hogares por capítulos y por área metropolitana (los detalles de las variables se pueden observar en el archivo "usa.xlsx"). Efectuar un análisis de componentes principales.*
+
+```{r ej5-datos}
+usa <- read.csv(file.path(datos, "hspendusa2009.csv"), stringsAsFactors = FALSE)
+usa$meta <- trimws(usa$meta)
+vars5 <- paste0("s", 1:12)
+X5 <- usa[vars5]
+cols5 <- length(vars5)
+str(usa)
+```
+
+```{r ej5-desc, results='asis'}
+descriptivo(X5)
+```
+
+**Basado en matriz de correlaciones:**
+
+```{r ej5-cor}
+pc5 <- pca_corr(X5, ref = c(1, 11, 1, 1))   # s1 positiva en los componentes 1, 3 y 4; s11 en el 2
+tabla(tabla_pca(pc5$ev), d = 4)
+tabla(pc5$V, d = 4)
+```
+
+**Basado en matriz de varianzas y covarianzas:**
+
+```{r ej5-cov}
+pc5_cov <- pca_cov(X5)
+tabla_cient(as.matrix(tabla_pca(pc5_cov$ev)), d = 4)
+tabla(pc5_cov$V, d = 4)
+```
+
+**Selección del número de componentes.**
+
+```{r ej5-scree}
+screeplot_r(pc5$ev)
+```
+
+```{r ej5-barras, fig.height = 4.5}
+barras_prop(pc5$ev, umbral = 0.8)
+```
+
+```{r ej5-pct}
+acum5 <- cumsum(pc5$ev) / sum(pc5$ev)
+```
+
+Con el criterio del autovalor mayor a 1 se seleccionarían tres componentes, pero estos explican solo `r fmt(100 * acum5[3], 4)`% de la varianza, por debajo del umbral del 80%; con el cuarto componente se alcanza `r fmt(100 * acum5[4], 4)`%. Por lo tanto, se sugiere extraer los cuatro primeros componentes principales.
+
+**Clasificación de las áreas metropolitanas según los dos primeros componentes.**
+
+```{r ej5-scatter, fig.height = 6.5, fig.width = 9}
+sc5 <- scores_pca(X5, pc5)
+scatter_pca(sc5, usa$meta, cex_lab = 0.55)
+```
+
+**Biplot (c = 0,5).**
+
+```{r ej5-biplot, fig.height = 7, fig.width = 9}
+biplot_r(X5, pc5, c = 0.5, dx = 1, dy = 2, etiquetas = usa$meta, cex_obs = 0.4)
+```
