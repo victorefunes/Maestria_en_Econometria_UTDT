@@ -1,0 +1,516 @@
+---
+title: "Examen Final - Métodos Empíricos en Macroeconomía Estructural (réplica en R)"
+subtitle: "Réplica de `Examen_Final.m` y contraste con `Examen Final (R).pdf` / `Examen_final.mat`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    df_print: paged
+    code_folding: hide
+lang: es
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 10, fig.height = 7, dpi = 110)
+library(readxl)     # lectura de Base.xlsx
+library(ggplot2)    # gráficos
+library(R.matlab)   # lectura de Examen_final.mat (referencia)
+library(knitr)
+```
+
+# Alcance y convenciones
+
+Este documento replica **línea por línea** el código MATLAB `Examen_Final.m` (incluida
+`var_ls.m`), *sin corregirlo*: la idea es reproducir lo que hizo el script original y
+dejar constancia de dónde los resultados difieren de lo reportado en
+`Examen Final (R).pdf` y del archivo `Examen_final.mat` (que guarda los resultados que
+produjo MATLAB). Las diferencias se resumen en la sección final.
+
+Convenciones del port:
+
+* Las matrices se mantienen con la misma orientación que en MATLAB (variables en filas,
+  tiempo en columnas).
+* `prctile` de MATLAB equivale a `quantile(..., type = 5)` en R.
+* La semilla (`12345`) se fija con `set.seed`, pero el generador de números aleatorios
+  de R **no** es el de MATLAB; por eso las bandas de confianza (bootstrap) solo pueden
+  coincidir de forma aproximada, nunca exacta.
+* El signo de un autovector es arbitrario. Para la identificación del *news shock* se
+  adopta la normalización "impacto positivo sobre *Hours*", que es la que exhibe el
+  `.mat`.
+
+# Datos
+
+```{r datos}
+base <- read_excel("Base.xlsx", sheet = 2)          # base definitiva (260 obs.)
+set.seed(12345)
+
+var_tfp          <- base[[2]]
+var_output       <- base[[3]]
+var_consumption  <- base[[4]]
+var_hours        <- base[[5]]
+var_stock_prices <- base[[6]]
+var_inflation    <- base[[7]]
+var_confidence   <- base[[8]]
+
+# Arrays con variables en filas y tiempo en columnas
+Y4 <- t(cbind(var_tfp, var_consumption, var_output, var_hours))
+Y7 <- t(cbind(var_tfp, var_consumption, var_output, var_hours,
+              var_stock_prices, var_inflation, var_confidence))
+
+cat("Observaciones:", ncol(Y4), " - Período:", base$date[1], "a", base$date[nrow(base)], "\n")
+```
+
+# Funciones
+
+## `var_ls` (estimación de un VAR(p) por MCO; Hevia)
+
+```{r var_ls}
+var_ls <- function(data, p, pmax = p) {
+  if (p > pmax) stop("p debe ser <= pmax")
+  if (nrow(data) > ncol(data)) data <- t(data)
+
+  maxlag <- max(pmax, p)
+  nobs   <- ncol(data) - maxlag
+  k      <- nrow(data)
+
+  Y <- data[, (maxlag + 1):ncol(data), drop = FALSE]
+  Z <- matrix(0, k * p + 1, nobs)
+  Z[1, ] <- 1
+  for (i in 1:p) {
+    Z[(2 + (i - 1) * k):(1 + i * k), ] <- data[, (maxlag + 1 - i):(maxlag + nobs - i)]
+  }
+
+  ZZi   <- solve(Z %*% t(Z))
+  beta  <- Y %*% t(Z) %*% ZZi
+  resid <- Y - beta %*% Z
+  Omega <- resid %*% t(resid) / nobs
+
+  # sderr = sqrt(diag(kron(inv(ZZ'), Omega))) ordenado como beta
+  sderr_beta <- sqrt(outer(diag(Omega), diag(ZZi)))
+  tval_beta  <- beta / sderr_beta
+
+  nv      <- k * (k * p + 1)
+  loglike <- -(nobs / 2) * (k * log(2 * pi) + k + log(det(Omega)))
+  AIC     <- (-2 * loglike + 2 * nv) / nobs
+  SIC     <- (-2 * loglike + nv * log(nobs)) / nobs
+  HQC     <- (-2 * loglike + 2 * nv * log(log(nobs))) / nobs
+
+  out <- list(lags = p, const = beta[, 1], resid = resid, Omega = Omega,
+              loglike = loglike, AIC = AIC, SIC = SIC, HQC = HQC,
+              nobs = nobs, npar = nv,
+              coef  = lapply(1:p, function(i) beta[, (2 + (i - 1) * k):(1 + i * k), drop = FALSE]),
+              sderr = list(const = sderr_beta[, 1],
+                           coef = lapply(1:p, function(i) sderr_beta[, (2 + (i - 1) * k):(1 + i * k), drop = FALSE])),
+              tval  = list(const = tval_beta[, 1],
+                           coef = lapply(1:p, function(i) tval_beta[, (2 + (i - 1) * k):(1 + i * k), drop = FALSE])))
+  out
+}
+```
+
+## `calcular_R`, `calcular_news_shock`, `calcular_irf`, `graficar_irf`
+
+```{r funciones}
+calcular_R <- function(VAR, A0_inv, H) {
+  p <- VAR$lags
+  k <- nrow(A0_inv)
+
+  # Psi[[h+1]] = Psi_h (Psi_0 = I)
+  Psi <- vector("list", H + 1)
+  Psi[[1]] <- diag(k)
+  for (h in 1:H) {
+    Psi_h <- matrix(0, k, k)
+    for (lag in 1:min(h, p)) Psi_h <- Psi_h + VAR$coef[[lag]] %*% Psi[[h - lag + 1]]
+    Psi[[h + 1]] <- Psi_h
+  }
+
+  R <- matrix(0, H, k)
+  for (h in 1:H) R[h, ] <- (Psi[[h + 1]] %*% A0_inv)[1, ]   # igual que MATLAB: h = 1..H
+  R
+}
+
+calcular_news_shock <- function(R) {
+  Q      <- t(R) %*% R
+  Q_rest <- Q[-1, -1, drop = FALSE]
+  e      <- eigen(Q_rest, symmetric = TRUE)
+  gamma_rest <- e$vectors[, which.max(e$values)]
+  news_shock <- c(0, gamma_rest)
+  news_shock / sqrt(sum(news_shock^2))
+}
+
+calcular_irf <- function(VAR, shock, share_c, H, reps) {
+  p <- VAR$lags
+  k <- nrow(VAR$resid)
+  T <- ncol(VAR$resid)
+
+  # Recursión de la IRF (+ fila k+1 = "investment" = output - share_c * consumption)
+  irf <- matrix(0, k + 1, H)
+  irf[1:k, 1] <- shock
+  irf[k + 1, 1] <- irf[3, 1] - share_c * irf[2, 1]
+  for (h in 2:H) {
+    for (lag in 1:min(h - 1, p)) {
+      irf[1:k, h] <- irf[1:k, h] + VAR$coef[[lag]] %*% irf[1:k, h - lag]
+    }
+    irf[k + 1, h] <- irf[3, h] - share_c * irf[2, h]
+  }
+
+  # Bootstrap tal como está programado en MATLAB:
+  #  - los coeficientes NO se re-estiman
+  #  - a la IRF se le suma un residuo remuestreado en cada horizonte h >= 2
+  irf_sim <- array(0, c(k + 1, H, reps))
+  for (rep in 1:reps) {
+    Yb <- matrix(0, k, H)
+    Yb[, 1] <- shock
+    for (h in 2:H) {
+      for (lag in 1:min(h - 1, p)) Yb[, h] <- Yb[, h] + VAR$coef[[lag]] %*% Yb[, h - lag]
+      Yb[, h] <- Yb[, h] + VAR$resid[, sample.int(T, 1)]
+    }
+    irf_sim[1:k, , rep] <- Yb
+    irf_sim[k + 1, , rep] <- irf_sim[3, , rep] - share_c * irf_sim[2, , rep]
+  }
+  irf_lower <- apply(irf_sim, c(1, 2), quantile, probs = 0.05, type = 5)
+  irf_upper <- apply(irf_sim, c(1, 2), quantile, probs = 0.95, type = 5)
+
+  # Para el VAR de 7 variables, "investment" pasa a la fila 5
+  if (k == 7) {
+    ord <- c(1:4, 8, 5:7)
+    irf <- irf[ord, ]; irf_lower <- irf_lower[ord, ]; irf_upper <- irf_upper[ord, ]
+  }
+  list(irf = irf, lower = irf_lower, upper = irf_upper)
+}
+
+graficar_irf <- function(res, H, names, title = NULL) {
+  k <- nrow(res$irf)
+  df <- data.frame(
+    h     = rep(0:(H - 1), times = k),
+    var   = factor(rep(names, each = H), levels = names),
+    irf   = as.vector(t(res$irf)),
+    lower = as.vector(t(res$lower)),
+    upper = as.vector(t(res$upper))
+  )
+  ggplot(df, aes(h)) +
+    geom_ribbon(aes(ymin = lower, ymax = upper), fill = "grey80") +
+    geom_line(aes(y = irf), colour = "blue", linewidth = 0.9) +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    facet_wrap(~var, scales = "free_y", ncol = 3) +
+    scale_x_continuous(breaks = seq(0, H, 5)) +
+    labs(x = "Horizon", y = "Percent", title = title) +
+    theme_minimal(base_size = 10) +
+    theme(strip.text = element_text(face = "bold"))
+}
+```
+
+```{r cargar-mat}
+# Resultados de referencia guardados por MATLAB (si el archivo está disponible)
+mat_file <- "Examen_final.mat"
+ref <- NULL
+if (file.exists(mat_file)) {
+  m <- readMat(mat_file)
+  r <- m[["results"]]
+  ref <- list(
+    Y4 = list(AIC = c(r[[1]][[1]]), SIC = c(r[[1]][[2]]), HQC = c(r[[1]][[3]]),
+              nlags = c(AIC = r[[1]][[4]], SIC = r[[1]][[5]], HQC = r[[1]][[6]]),
+              VAR = r[[1]][[7]], news = c(r[[1]][[8]]), surprise = c(r[[1]][[9]]),
+              irf = list(news4 = r[[1]][10:12], sur4 = r[[1]][13:15],
+                         news7 = r[[1]][16:18], sur7 = r[[1]][19:21])),
+    Y7 = list(AIC = c(r[[2]][[1]]), SIC = c(r[[2]][[2]]), HQC = c(r[[2]][[3]]),
+              nlags = c(AIC = r[[2]][[4]], SIC = r[[2]][[5]], HQC = r[[2]][[6]]),
+              VAR = r[[2]][[7]], news = c(r[[2]][[8]]), surprise = c(r[[2]][[9]])),
+    share_c = c(m[["share.c"]]))
+}
+cat("Archivo .mat de referencia:", if (is.null(ref)) "NO encontrado" else "cargado", "\n")
+```
+
+# Ejercicio 1: VAR estructural con 4 y con 7 variables
+
+## Selección del número de rezagos
+
+```{r rezagos, results = "asis"}
+results <- list()
+lag_max   <- 10
+datasets  <- list(Y4 = Y4, Y7 = Y7)
+criterias <- c("AIC", "SIC", "HQC")
+
+for (nm in names(datasets)) {
+  Y <- datasets[[nm]]
+  tab <- sapply(criterias, function(cr)
+    sapply(1:lag_max, function(l) var_ls(Y, l, lag_max)[[cr]]))
+  results[[nm]] <- list(crit = tab, nlags = apply(tab, 2, which.min))
+  cat("\n\n**Criterios de información para", nm, "**\n\n")
+  print(kable(data.frame(Lag = 1:lag_max, round(tab, 3)), row.names = FALSE))
+  cat("\n\nRezagos óptimos:", paste(criterias, results[[nm]]$nlags, collapse = " | "), "\n")
+}
+```
+
+## Estimación de los VAR (3 rezagos, como en el script)
+
+```{r var-est}
+# El script usa 3 rezagos (como Barsky y Sims) y no el óptimo según SIC.
+for (nm in names(datasets)) results[[nm]]$VAR <- var_ls(datasets[[nm]], 3)
+
+cat("VAR Y4: nobs =", results$Y4$VAR$nobs, " npar =", results$Y4$VAR$npar, "\n")
+cat("VAR Y7: nobs =", results$Y7$VAR$nobs, " npar =", results$Y7$VAR$npar, "\n")
+cat("\nConstantes Y4:\n"); print(round(results$Y4$VAR$const, 4))
+cat("\nOmega Y4:\n");      print(round(results$Y4$VAR$Omega, 4))
+```
+
+## Identificación del *news shock* y del *surprise technology shock*
+
+```{r shocks}
+H <- 40
+for (nm in names(datasets)) {
+  VAR <- results[[nm]]$VAR
+  epsilon <- 1e-5
+  k <- nrow(VAR$Omega)
+  # chol(..., 'lower') de MATLAB = t(chol()) de R; A0_inv = inv(L)  (tal cual el script)
+  L      <- t(chol(VAR$Omega + epsilon * diag(k)))
+  A0_inv <- solve(L)
+
+  R <- calcular_R(VAR, A0_inv, H)
+  news <- calcular_news_shock(R)
+  results[[nm]]$news_shock          <- news
+  results[[nm]]$surprise_tech_shock <- A0_inv[, 1]
+}
+
+cat("NEWS SHOCK Y4:\n");     print(round(results$Y4$news_shock, 4))
+cat("SURPRISE TECH Y4:\n");  print(round(results$Y4$surprise_tech_shock, 4))
+cat("NEWS SHOCK Y7:\n");     print(round(results$Y7$news_shock, 4))
+cat("SURPRISE TECH Y7:\n");  print(round(results$Y7$surprise_tech_shock, 4))
+```
+
+## Verificación de ortogonalidad
+
+```{r ortogonalidad}
+for (nm in names(datasets)) {
+  s <- results[[nm]]$surprise_tech_shock
+  n <- results[[nm]]$news_shock
+  dp <- sum(s * n)
+  cat(sprintf('Producto punto surprise·news - VAR %s: %.6f\n', nm, dp))
+  if (abs(dp) > 1e-5) {
+    n_ort <- n - (dp / sum(s * s)) * s
+    n_ort <- n_ort / sqrt(sum(n_ort^2))
+    cat(sprintf('Nuevo producto punto - VAR %s: %.6f\n', nm, sum(s * n_ort)))
+    results[[nm]]$news_shock <- n_ort
+  }
+  # Normalización de signo (el autovector es de signo arbitrario): impacto positivo sobre Hours.
+  # Se aplica al final porque el impacto sobre Hours es ~0 antes de ortogonalizar.
+  if (results[[nm]]$news_shock[4] < 0) results[[nm]]$news_shock <- -results[[nm]]$news_shock
+}
+```
+
+# Ejercicio 2: funciones impulso-respuesta
+
+```{r irf-calculo}
+Y4_names <- c("TFP", "Consumption", "Output", "Hours", "Investment")
+Y7_names <- c("TFP", "Consumption", "Output", "Hours", "Investment",
+              "Stock Prices", "Inflation", "Consumer Confidence")
+
+# share_c: promedio de consumo/producto (columna share_c de la hoja "prepara_base")
+share_c_calc <- mean(read_excel("Base.xlsx", sheet = 1)$share_c, na.rm = TRUE)
+share_c <- 0.7432          # valor hardcodeado en el script
+H <- 40; reps <- 2000
+cat("share_c recalculado desde Base.xlsx:", round(share_c_calc, 4), " | usado en el script:", share_c, "\n")
+
+irf_Y4_news <- calcular_irf(results$Y4$VAR, results$Y4$news_shock,          share_c, H, reps)
+irf_Y4_surp <- calcular_irf(results$Y4$VAR, results$Y4$surprise_tech_shock, share_c, H, reps)
+irf_Y7_news <- calcular_irf(results$Y7$VAR, results$Y7$news_shock,          share_c, H, reps)
+irf_Y7_surp <- calcular_irf(results$Y7$VAR, results$Y7$surprise_tech_shock, share_c, H, reps)
+```
+
+*Las Figuras 1 y 7 y la Tabla 1 del paper están como secciones vacías en el `.m` original
+(solo existen los encabezados) y el PDF reporta únicamente las Figuras 2 a 6; tampoco se
+replican aquí.*
+
+## Figura 2. News shock, VAR de 4 variables
+
+```{r fig2}
+graficar_irf(irf_Y4_news, H, Y4_names, "Figure 2. Impulse response to news shock: four variable VAR")
+```
+
+## Figura 3. Surprise technology shock, VAR de 4 variables
+
+```{r fig3}
+graficar_irf(irf_Y4_surp, H, Y4_names, "Figure 3. Impulse response to surprise technology shock: four variable VAR")
+```
+
+## Figuras 4 y 5. News shock, VAR de 7 variables
+
+```{r fig45, fig.height = 8}
+graficar_irf(irf_Y7_news, H, Y7_names, "Figures 4 & 5. Impulse response to news shock: seven variable VAR")
+```
+
+## Figura 6. Surprise technology shock, VAR de 7 variables
+
+```{r fig6, fig.height = 8}
+graficar_irf(irf_Y7_surp, H, Y7_names, "Figure 6. Impulse response to surprise technology shock: seven variable VAR")
+```
+
+# Contraste con los resultados reportados
+
+```{r comparacion-helpers, include=FALSE}
+maxdiff <- function(a, b) max(abs(as.numeric(a) - as.numeric(b)))
+# alinea el signo de `a` con el de `b` (autovectores)
+alinear <- function(a, b) if (sum(a * b) < 0) -a else a
+```
+
+## 1. Selección de rezagos (`.mat` y PDF)
+
+```{r cmp-lags, eval = !is.null(ref)}
+tab <- data.frame(
+  Modelo   = rep(c("Y4", "Y7"), each = 3),
+  Criterio = rep(criterias, 2),
+  R        = c(results$Y4$nlags, results$Y7$nlags),
+  MATLAB   = c(ref$Y4$nlags, ref$Y7$nlags),
+  `PDF (nota 1)` = c(NA, 2, NA, NA, 1, NA), check.names = FALSE)
+tab$Coincide <- ifelse(tab$R == tab$MATLAB, "sí", "NO")
+kable(tab, caption = "Número óptimo de rezagos")
+
+crit_diff <- c(
+  Y4 = max(sapply(criterias, function(cr) maxdiff(results$Y4$crit[, cr], ref$Y4[[cr]]))),
+  Y7 = max(sapply(criterias, function(cr) maxdiff(results$Y7$crit[, cr], ref$Y7[[cr]]))))
+cat("Máx. diferencia absoluta en los criterios de información (R vs MATLAB):\n"); print(crit_diff)
+```
+
+## 2. Coeficientes y matriz de covarianzas del VAR
+
+```{r cmp-var, eval = !is.null(ref)}
+cmp_var <- function(nm) {
+  vr <- ref[[nm]]$VAR; vm <- results[[nm]]$VAR
+  coef_ref <- lapply(vr[[11]], function(x) x[[1]])
+  c(const = maxdiff(vm$const, vr[[2]]),
+    coef  = max(mapply(maxdiff, vm$coef, coef_ref)),
+    Omega = maxdiff(vm$Omega, vr[[4]]),
+    loglike = abs(vm$loglike - vr[[5]]))
+}
+kable(rbind(Y4 = cmp_var("Y4"), Y7 = cmp_var("Y7")), digits = 10,
+      caption = "Máxima diferencia absoluta R vs MATLAB")
+```
+
+## 3. Shocks identificados
+
+```{r cmp-shocks, eval = !is.null(ref)}
+cmp_sh <- data.frame(
+  Shock = c("News Y4", "Surprise Y4", "News Y7", "Surprise Y7"),
+  `Máx. dif. abs.` = c(
+    maxdiff(alinear(results$Y4$news_shock, ref$Y4$news), ref$Y4$news),
+    maxdiff(results$Y4$surprise_tech_shock, ref$Y4$surprise),
+    maxdiff(alinear(results$Y7$news_shock, ref$Y7$news), ref$Y7$news),
+    maxdiff(results$Y7$surprise_tech_shock, ref$Y7$surprise)),
+  `Signo coincide sin alinear` = c(
+    sum(results$Y4$news_shock * ref$Y4$news) > 0, TRUE,
+    sum(results$Y7$news_shock * ref$Y7$news) > 0, TRUE),
+  check.names = FALSE)
+kable(cmp_sh, digits = 8, caption = "Shocks: R vs MATLAB (news shock alineado en signo)")
+```
+
+## 4. Funciones impulso-respuesta (estimación puntual y bandas)
+
+```{r cmp-irf, eval = !is.null(ref)}
+cmp_irf <- function(mine, refl, nm) {
+  # refl = lista (irf, lower, upper) de MATLAB
+  ri <- refl[[1]]; rl <- refl[[2]]; ru <- refl[[3]]
+  data.frame(
+    Figura = nm,
+    `Máx. dif. IRF puntual`   = maxdiff(mine$irf, ri),
+    `Ancho banda R (prom.)`   = mean(mine$upper - mine$lower),
+    `Ancho banda MATLAB (prom.)` = mean(ru - rl),
+    `Cociente de anchos`      = mean(mine$upper - mine$lower) / mean(ru - rl),
+    check.names = FALSE)
+}
+kable(rbind(
+  cmp_irf(irf_Y4_news, ref$Y4$irf$news4, "Fig. 2 (news, Y4)"),
+  cmp_irf(irf_Y4_surp, ref$Y4$irf$sur4,  "Fig. 3 (surprise, Y4)"),
+  cmp_irf(irf_Y7_news, ref$Y4$irf$news7, "Fig. 4-5 (news, Y7)"),
+  cmp_irf(irf_Y7_surp, ref$Y4$irf$sur7,  "Fig. 6 (surprise, Y7)")),
+  digits = 4, caption = "IRF: R vs MATLAB (las bandas dependen del RNG; ver nota)")
+```
+
+La IRF puntual no depende del azar y debe coincidir; las bandas sí dependen de la
+semilla/generador, por lo que solo se espera una magnitud similar (cociente de anchos cercano a 1).
+
+## 5. Cifras citadas en el PDF
+
+```{r cmp-pdf}
+pdf_claims <- data.frame(
+  Afirmación = c("Observaciones", "Período", "Rezagos óptimos SIC (Y4)", "Rezagos óptimos SIC (Y7)",
+                 "Ponderador consumo/producto"),
+  PDF = c("260", "1960Q1-2024Q4", "2", "1", "0,7432"),
+  `Réplica en R` = c(ncol(Y4), paste(base$date[1], "a", base$date[nrow(base)]),
+                     results$Y4$nlags["SIC"], results$Y7$nlags["SIC"], round(share_c_calc, 4)),
+  check.names = FALSE)
+kable(pdf_claims)
+```
+
+```{r cualitativo}
+# Comprobaciones cualitativas citadas en el PDF
+ancho <- function(x) mean(x$upper - x$lower)
+cat("Consumo bajo news shock (Y4), primeros 3 períodos:", round(irf_Y4_news$irf[2, 1:3], 3), "\n")
+cat("TFP bajo news shock (Y4), primeros 6 períodos:", round(irf_Y4_news$irf[1, 1:6], 2), "\n")
+# Ancho medio de la banda relativo al rango de la IRF puntual, por variable (Y4)
+rel <- function(x) round(sapply(1:nrow(x$irf), function(i)
+  mean(x$upper[i, ] - x$lower[i, ]) / diff(range(x$irf[i, ]))), 2)
+tab_rel <- rbind(news = rel(irf_Y4_news), surprise = rel(irf_Y4_surp))
+colnames(tab_rel) <- Y4_names
+print(tab_rel)
+```
+
+# Discrepancias y observaciones
+
+## A. Réplica en R vs. `Examen_final.mat` (resultados guardados por MATLAB)
+
+| Elemento | Resultado |
+|---|---|
+| Criterios AIC/SIC/HQC y rezagos óptimos (Y4: 4/2/2; Y7: 4/1/2) | Coinciden (dif. máx. ~1e-10) |
+| Coeficientes, constantes, $\Omega$, log-verosimilitud de ambos VAR | Coinciden (dif. máx. ~2e-6, ruido numérico de `solve` vs `/`) |
+| *Surprise technology shock* | Coincide exactamente |
+| *News shock* (tras ortogonalizar) | Coincide **salvo el signo** del autovector, que es arbitrario; se normalizó a impacto positivo sobre *Hours*, como en el `.mat` |
+| IRF puntuales (Figuras 2, 3, 4-5 y 6) | Coinciden exactamente |
+| Bandas de confianza (bootstrap) | **Difieren levemente y es inevitable**: el RNG de R no es el de MATLAB (`rng(12345)`). El ancho medio de las bandas es ~2-4 % menor en R; la forma y el orden de magnitud son iguales |
+
+No se encontró ninguna discrepancia numérica atribuible al port en sí.
+
+## B. Discrepancias entre el texto del PDF y el código/resultados
+
+1. **Rezagos usados.** El PDF (punto 4 del resumen) dice que los VAR se estiman con el número
+   óptimo según SIC. El código usa **3 rezagos** (la línea con SIC está comentada). El PDF lo aclara
+   en la nota 1, pero el resumen del punto 4 queda inconsistente con lo ejecutado. Los óptimos
+   según SIC (2 y 1) sí se reproducen.
+2. **Figuras/Tabla incompletas.** La consigna pide las Figuras 1 a 7 y, como crédito extra, la
+   Tabla 1. El código solo tiene los encabezados vacíos de las Figuras 1 y 7, y el PDF presenta
+   2 a 6. No es una diferencia numérica, pero conviene dejarlo explícito.
+3. **"Bootstrap con 2.000 réplicas".** El PDF lo presenta como un bootstrap de la IRF, pero el
+   código (i) no re-estima el VAR en cada réplica, (ii) toma la IRF determinística y le suma un
+   residuo remuestreado en cada horizonte (`randi(T)` dentro del bucle, sobre un
+   conjunto ya remuestreado con `idx`: doble remuestreo). Por eso las bandas no tienen la interpretación
+   habitual de incertidumbre de estimación. Esto explica la observación del PDF de que las bandas
+   del *news shock* son mucho más angostas y las del *surprise shock* mucho más anchas que en el
+   paper: en esta réplica el ancho medio de banda relativo al rango de la IRF es ~0,1 para el
+   *news shock* y ~1 a 2 para el *surprise shock* (tabla de la sección anterior).
+4. **Afirmaciones cualitativas del PDF: se reproducen todas.**
+   - La IRF de TFP es errática en los primeros períodos (valores de ±40 que luego caen a ~0).
+   - La IRF de *consumption* ante el *news shock* es negativa al inicio (-0,84, -0,48, -0,18), cuando en el paper nunca lo es.
+   - 260 observaciones, 1960Q1-2024Q4 y ponderador 0,7432 (se recalcula desde `Base.xlsx`): coinciden.
+
+## C. Posibles causas de la discrepancia con el paper (observaciones sobre el código; no se corrigieron)
+
+El PDF sugiere que las diferencias con el paper pueden deberse a la identificación. Revisando
+el código, hay puntos concretos que lo explicarían:
+
+1. **`A0_inv` es en realidad `inv(chol(Omega))`.** Para el impacto contemporáneo de los shocks
+   estructurales se necesita el factor de Cholesky $P$ ($\Omega = PP'$), no su inversa. El
+   *surprise technology shock* se toma como `A0_inv(:,1)`, que no es la primera columna de $P$.
+2. **El vector `gamma` del *news shock* vive en el espacio de shocks ortogonalizados**, pero se
+   usa directamente como vector de impacto sobre las variables (`irf(1:k,1) = shock`) sin
+   multiplicar por la matriz de impacto.
+3. **Se rompe la restricción de impacto nulo sobre TFP.** El *news shock* identificado tiene
+   TFP = 0 en la primera componente, pero al ortogonalizarlo contra el *surprise shock*
+   (`news - proj`) esa componente deja de ser cero. En esta réplica la respuesta de TFP en $t=0$ es
+   `r round(irf_Y4_news$irf[1, 1], 3)` (VAR de 4 variables) y `r round(irf_Y7_news$irf[1, 1], 3)`
+   (VAR de 7 variables), en lugar de 0 como en la Figura 2 del paper.
+4. **`calcular_R` omite el horizonte 0** (usa $\Psi_1,\dots,\Psi_H$) y maximiza la suma de
+   cuadrados de la respuesta de TFP, no la participación en la varianza del error de pronóstico
+   a horizonte 40 que usan Barsky y Sims.
+5. **Unidades.** *Hours* se usa en niveles (~840), no en logaritmos. Por eso su IRF alcanza ~1000 y
+   la etiqueta "Percent" del eje no es correcta para esa variable.
+6. **Convención de nombres.** Las IRF del VAR de 7 variables se guardan en
+   `results.Y4.irf_Y7_*` (no en `results.Y7`), algo a tener en cuenta al leer el `.mat`.
